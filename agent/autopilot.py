@@ -153,6 +153,84 @@ async def _generate_reply(target_text: str) -> str:
     return text
 
 
+async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
+    """Только ответы на чужие посты — без публикации своих"""
+    settings = get_autopilot_settings()
+    keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане"])
+
+    if notify_fn:
+        await notify_fn(f"Ищу посты по ключевым словам:\n{', '.join(keywords)}")
+
+    candidate_posts = []
+    search_errors = []
+    for keyword in keywords:
+        try:
+            data = await search_posts(keyword, limit=20)
+            if data.get("error"):
+                err_msg = f"'{keyword}': {data['error']}"
+                search_errors.append(err_msg)
+            else:
+                found = data.get("data", [])
+                logger.info(f"Поиск '{keyword}': найдено {len(found)} постов")
+                for p in found:
+                    if p.get("id") and not is_already_replied(p["id"]) and p.get("text"):
+                        candidate_posts.append(p)
+        except Exception as e:
+            search_errors.append(f"'{keyword}': {e}")
+
+    if search_errors and notify_fn:
+        await notify_fn(f"⚠️ Ошибки поиска:\n" + "\n".join(search_errors))
+
+    if not candidate_posts:
+        if notify_fn:
+            await notify_fn("Не найдено новых постов для ответов.")
+        return {"replies_published": 0, "errors": search_errors}
+
+    candidate_posts.sort(
+        key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0),
+        reverse=True
+    )
+    to_reply = candidate_posts[:count]
+
+    if notify_fn:
+        await notify_fn(f"Найдено {len(to_reply)} постов. Начинаю отвечать...")
+
+    results = {"replies_published": 0, "errors": []}
+
+    for i, target in enumerate(to_reply):
+        try:
+            reply_text = await _generate_reply(target["text"])
+            result = await reply_to_post(target["id"], reply_text)
+
+            if result.get("success"):
+                mark_replied(target["id"])
+                results["replies_published"] += 1
+                if notify_fn:
+                    await notify_fn(
+                        f"✅ Ответ {i+1}/{len(to_reply)} → @{target.get('username','?')}:\n"
+                        f"{reply_text[:120]}..."
+                    )
+            else:
+                err = result.get("error", "неизвестная ошибка")
+                results["errors"].append(f"Ответ {i+1}: {err}")
+                if notify_fn:
+                    await notify_fn(f"❌ Ответ {i+1} не удался: {err}")
+        except Exception as e:
+            results["errors"].append(f"Ответ {i+1}: {e}")
+
+        if i < len(to_reply) - 1:
+            delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
+            await asyncio.sleep(delay)
+
+    if notify_fn:
+        await notify_fn(
+            f"Ответы завершены!\n"
+            f"Опубликовано: {results['replies_published']}/{len(to_reply)}\n"
+            + (f"Ошибок: {len(results['errors'])}" if results["errors"] else "")
+        )
+    return results
+
+
 async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     """Главная функция автопилота"""
     settings = get_autopilot_settings()
@@ -204,14 +282,23 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
 
     # ── 2. Ответы на чужие посты ──────────────────────────
     candidate_posts = []
+    search_errors = []
     for keyword in keywords:
         try:
             data = await search_posts(keyword, limit=15)
-            for p in data.get("data", []):
-                if p.get("id") and not is_already_replied(p["id"]) and p.get("text"):
-                    candidate_posts.append(p)
+            if data.get("error"):
+                err_msg = f"Поиск '{keyword}': {data['error']}"
+                logger.warning(err_msg)
+                search_errors.append(err_msg)
+            else:
+                found = data.get("data", [])
+                logger.info(f"Поиск '{keyword}': найдено {len(found)} постов")
+                for p in found:
+                    if p.get("id") and not is_already_replied(p["id"]) and p.get("text"):
+                        candidate_posts.append(p)
         except Exception as e:
             logger.warning(f"Поиск '{keyword}': {e}")
+            search_errors.append(str(e))
 
     # Сортируем по вовлечённости
     candidate_posts.sort(
@@ -221,7 +308,10 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     to_reply = candidate_posts[:reply_count]
 
     if not to_reply:
-        msg = "Нет новых постов для ответов (нужен пермишен threads_keyword_search)"
+        if search_errors:
+            msg = f"Ошибка поиска постов:\n{chr(10).join(search_errors[:2])}"
+        else:
+            msg = "Нет новых постов для ответов"
         if notify_fn:
             await notify_fn(msg)
     else:

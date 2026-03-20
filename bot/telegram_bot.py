@@ -71,7 +71,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/autopilot — статус и управление автопилотом\n"
         "/autopilot_on — включить автопилот\n"
         "/autopilot_off — выключить автопилот\n"
-        "/run_autopilot — запустить автопилот сейчас\n"
+        "/run_autopilot — запустить автопилот сейчас (посты + ответы)\n"
+        "/run_replies — только ответы на чужие посты\n"
+        "/check_search — проверить работу поиска Threads\n"
         "/clear — очистить историю диалога\n\n"
         "Примеры запросов:\n"
         "• «Напиши вирусный пост про цены на продукты»\n"
@@ -182,6 +184,48 @@ async def run_autopilot_command(update: Update, context: ContextTypes.DEFAULT_TY
     asyncio.create_task(run_autopilot(notify_fn=notify, force=True))
 
 
+async def run_replies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запустить только ответы на чужие посты"""
+    if not is_authorized(update):
+        return
+
+    await update.message.reply_text(
+        "Ищу посты для ответов...\n"
+        "Буду присылать уведомления по ходу."
+    )
+
+    from agent.autopilot import run_replies_only
+    import asyncio
+
+    asyncio.create_task(run_replies_only(notify_fn=notify, count=10))
+
+
+async def check_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить работу поиска Threads — диагностика threads_keyword_search"""
+    if not is_authorized(update):
+        return
+
+    from agent.skills.threads import search_posts
+
+    await update.message.reply_text("Проверяю поиск Threads API...")
+
+    keyword = "цены"
+    data = await search_posts(keyword, limit=3)
+
+    if data.get("error"):
+        await update.message.reply_text(
+            f"❌ Ошибка поиска:\n{data['error']}\n\n"
+            f"Нужно перегенерировать access token с пермишеном threads_keyword_search"
+        )
+    else:
+        posts = data.get("data", [])
+        await update.message.reply_text(
+            f"✅ Поиск работает!\n"
+            f"По запросу «{keyword}» найдено: {len(posts)} постов\n\n"
+            + ("\n".join([f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in posts[:3]]) if posts else "Постов нет")
+        )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("Доступ запрещён.")
@@ -231,6 +275,8 @@ def create_bot() -> Application:
     _app.add_handler(CommandHandler("autopilot_on", autopilot_on_command))
     _app.add_handler(CommandHandler("autopilot_off", autopilot_off_command))
     _app.add_handler(CommandHandler("run_autopilot", run_autopilot_command))
+    _app.add_handler(CommandHandler("run_replies", run_replies_command))
+    _app.add_handler(CommandHandler("check_search", check_search_command))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Регистрируем notify функцию в планировщике
