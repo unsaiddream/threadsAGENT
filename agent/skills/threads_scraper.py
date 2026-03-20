@@ -286,27 +286,50 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
                 await page.wait_for_timeout(1000)
 
                 # Шаг 3: Кнопка "Опубликовать" / "Post"
-                # evaluate_handle возвращает JSHandle без .click() — используем evaluate + JS click
+                # Ждём чтобы Lexical editor обработал ввод и активировал кнопку
+                await page.wait_for_timeout(1500)
+
+                # Логируем все кнопки для диагностики + кликаем нужную
                 published = await page.evaluate("""
                     () => {
-                        const btns = document.querySelectorAll('button');
+                        const btns = Array.from(document.querySelectorAll('button'));
+                        const btnInfo = btns.map(b => ({
+                            text: (b.innerText || b.textContent || '').trim().slice(0, 40),
+                            label: b.getAttribute('aria-label') || '',
+                            disabled: b.disabled,
+                            type: b.type
+                        }));
+
+                        // Проверяем по innerText, textContent и aria-label
                         for (const b of btns) {
-                            const t = b.innerText.trim();
-                            if (/опублик|^post$|^reply$/i.test(t) && !b.disabled) {
+                            const text = (b.innerText || b.textContent || '').trim();
+                            const label = (b.getAttribute('aria-label') || '').trim();
+                            const combined = (text + ' ' + label).toLowerCase();
+                            if (/опублик|\\bpost\\b|\\breply\\b/.test(combined) && !b.disabled) {
                                 b.click();
-                                return t;
+                                return 'clicked: ' + (text || label);
                             }
                         }
-                        return null;
+
+                        // Fallback: последняя активная кнопка в диалоге (обычно "Опубликовать")
+                        const activeBtns = btns.filter(b => !b.disabled && b.type !== 'reset');
+                        if (activeBtns.length > 0) {
+                            const last = activeBtns[activeBtns.length - 1];
+                            last.click();
+                            return 'fallback_last: ' + (last.innerText || last.textContent || '').trim().slice(0, 30);
+                        }
+
+                        return 'NOT_FOUND:' + JSON.stringify(btnInfo.slice(0, 5));
                     }
                 """)
 
-                if published:
+                logger.info(f"Publish result: {published}")
+                if published and not published.startswith('NOT_FOUND'):
                     await page.wait_for_timeout(3000)
-                    logger.info(f"✅ Ответ опубликован ('{published}'): {post_url}")
+                    logger.info(f"✅ Ответ опубликован: {post_url}")
                     return {"success": True, "via_browser": True}
                 else:
-                    return {"error": "Не найдена кнопка Опубликовать"}
+                    return {"error": f"Не найдена кнопка Опубликовать. Кнопки: {published}"}
 
             finally:
                 await browser.close()
