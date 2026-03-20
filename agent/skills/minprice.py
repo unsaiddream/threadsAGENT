@@ -1,0 +1,112 @@
+"""
+minprice.kz API — получение реальных цен на продукты в Казахстане
+backend.minprice.kz/api — публичный REST API сайта
+"""
+import httpx
+import logging
+
+logger = logging.getLogger(__name__)
+
+BASE = "https://backend.minprice.kz/api"
+SITE_LINK = "https://minprice.kz/?th"
+HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+
+async def search_prices(query: str, limit: int = 5) -> list[dict]:
+    """
+    Ищет продукт и возвращает список с ценами по магазинам.
+    Пример: search_prices("бананы") → [{title, min_price, max_price, stores:[{name,price,prev_price}]}]
+    """
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+        resp = await client.get(
+            f"{BASE}/search",
+            params={"q": query},
+            headers=HEADERS
+        )
+        resp.raise_for_status()
+        hits = resp.json().get("hits", [])
+
+    results = []
+    for hit in hits[:limit]:
+        stores_data = []
+        for store in hit.get("stores", []):
+            if store.get("price"):
+                prev = store.get("previous_price")
+                change = None
+                if prev and prev != store["price"]:
+                    diff = store["price"] - prev
+                    pct = round(diff / prev * 100, 1)
+                    change = f"{'+' if diff > 0 else ''}{diff:.0f}₸ ({'+' if pct > 0 else ''}{pct}%)"
+                stores_data.append({
+                    "store": store.get("chain_name", store.get("store_name", "?")),
+                    "price": store["price"],
+                    "prev_price": prev,
+                    "change": change,
+                    "in_stock": store.get("in_stock", False),
+                })
+
+        if stores_data:
+            # Сортируем по цене
+            stores_data.sort(key=lambda x: x["price"])
+            results.append({
+                "title": hit["title"],
+                "min_price": hit.get("min_price"),
+                "max_price": hit.get("max_price"),
+                "stores": stores_data,
+                "link": SITE_LINK,
+            })
+
+    return results
+
+
+async def get_trending_products(limit: int = 10) -> list[dict]:
+    """
+    Получает список продуктов с наибольшим разбросом цен между магазинами
+    — хороший материал для постов "где купить дешевле"
+    """
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        resp = await client.get(
+            f"{BASE}/products",
+            params={"ordering": "-updated_at", "page_size": 50},
+            headers=HEADERS
+        )
+        resp.raise_for_status()
+        products = resp.json().get("results", [])
+
+    interesting = []
+    for p in products:
+        mn = p.get("min_price")
+        mx = p.get("max_price")
+        if mn and mx and mx > mn:
+            spread_pct = round((mx - mn) / mn * 100, 1)
+            if spread_pct > 10:  # Разброс больше 10% — интересно
+                interesting.append({
+                    "title": p["title"],
+                    "min_price": mn,
+                    "max_price": mx,
+                    "spread_pct": spread_pct,
+                    "stores_count": p.get("linked_stores_count", 0),
+                    "link": SITE_LINK,
+                })
+
+    interesting.sort(key=lambda x: x["spread_pct"], reverse=True)
+    return interesting[:limit]
+
+
+def format_price_data_for_prompt(products: list[dict]) -> str:
+    """Форматирует данные о ценах в читаемый текст для промпта Claude"""
+    if not products:
+        return "Данные о ценах не найдены."
+
+    lines = []
+    for p in products:
+        lines.append(f"📦 {p['title']}")
+        for s in p.get("stores", []):
+            stock = "✓" if s.get("in_stock") else "✗"
+            change_str = f" [{s['change']}]" if s.get("change") else ""
+            lines.append(f"  {s['store']}: {s['price']:.0f}₸{change_str} {stock}")
+        if p.get("link"):
+            lines.append(f"  Подробнее: {p['link']}")
+        lines.append("")
+
+    return "\n".join(lines)
