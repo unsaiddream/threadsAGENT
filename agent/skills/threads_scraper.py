@@ -286,27 +286,24 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
                 await page.wait_for_timeout(1000)
 
                 # Шаг 3: Кнопка "Опубликовать" / "Post"
-                publish_btn = await page.query_selector(
-                    'button:has-text("Опубликовать"), button:has-text("Post"), '
-                    'button:has-text("Reply"), [data-testid="new-post-submit-button"]'
-                )
-                if not publish_btn:
-                    # Ищем любую активную кнопку в диалоге
-                    publish_btn = await page.evaluate_handle("""
-                        () => {
-                            const btns = document.querySelectorAll('button');
-                            for (const b of btns) {
-                                const t = b.innerText.trim();
-                                if (/опублик|^post$|^reply$/i.test(t) && !b.disabled) return b;
+                # evaluate_handle возвращает JSHandle без .click() — используем evaluate + JS click
+                published = await page.evaluate("""
+                    () => {
+                        const btns = document.querySelectorAll('button');
+                        for (const b of btns) {
+                            const t = b.innerText.trim();
+                            if (/опублик|^post$|^reply$/i.test(t) && !b.disabled) {
+                                b.click();
+                                return t;
                             }
-                            return null;
                         }
-                    """)
+                        return null;
+                    }
+                """)
 
-                if publish_btn:
-                    await publish_btn.click()
+                if published:
                     await page.wait_for_timeout(3000)
-                    logger.info(f"✅ Ответ опубликован: {post_url}")
+                    logger.info(f"✅ Ответ опубликован ('{published}'): {post_url}")
                     return {"success": True, "via_browser": True}
                 else:
                     return {"error": "Не найдена кнопка Опубликовать"}
