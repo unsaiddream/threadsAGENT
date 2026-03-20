@@ -279,57 +279,54 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
                         pass
                     return {"error": "Не найдено поле ввода ответа (не залогинен или изменился UI)"}
 
+                url_before = page.url
                 await input_field.click()
                 await page.wait_for_timeout(500)
-                # Вводим текст через keyboard (работает с contenteditable)
-                await page.keyboard.type(reply_text, delay=30)
-                await page.wait_for_timeout(1000)
 
-                # Шаг 3: Кнопка "Опубликовать" / "Post"
-                # Ждём чтобы Lexical editor обработал ввод и активировал кнопку
+                # Вводим текст — очищаем сначала, потом пишем
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(reply_text, delay=25)
                 await page.wait_for_timeout(1500)
 
-                # Логируем все кнопки для диагностики + кликаем нужную
-                published = await page.evaluate("""
-                    () => {
-                        const btns = Array.from(document.querySelectorAll('button'));
-                        const btnInfo = btns.map(b => ({
-                            text: (b.innerText || b.textContent || '').trim().slice(0, 40),
-                            label: b.getAttribute('aria-label') || '',
-                            disabled: b.disabled,
-                            type: b.type
-                        }));
+                url_after = page.url
+                logger.info(f"URL before/after type: {url_before} → {url_after}")
 
-                        // Проверяем по innerText, textContent и aria-label
-                        for (const b of btns) {
-                            const text = (b.innerText || b.textContent || '').trim();
-                            const label = (b.getAttribute('aria-label') || '').trim();
-                            const combined = (text + ' ' + label).toLowerCase();
-                            if (/опублик|\\bpost\\b|\\breply\\b/.test(combined) && !b.disabled) {
-                                b.click();
-                                return 'clicked: ' + (text || label);
-                            }
+                # Шаг 3: Кнопка "Опубликовать" / "Post"
+                # Используем Playwright locator — надёжнее чем evaluate на динамических страницах
+                publish_locator = None
+                for btn_text in ["Опубликовать", "Post", "Reply"]:
+                    loc = page.get_by_role("button", name=btn_text)
+                    try:
+                        await loc.wait_for(state="visible", timeout=3000)
+                        publish_locator = loc
+                        logger.info(f"Кнопка найдена через locator: '{btn_text}'")
+                        break
+                    except Exception:
+                        continue
+
+                if not publish_locator:
+                    # Диагностика: что есть на странице
+                    btn_info = await page.evaluate("""
+                        () => {
+                            const all = document.querySelectorAll('button, [role=button]');
+                            return Array.from(all).map(b => ({
+                                text: (b.innerText || b.textContent || '').trim().slice(0, 30),
+                                label: b.getAttribute('aria-label') || '',
+                                disabled: b.disabled
+                            })).slice(0, 8);
                         }
+                    """)
+                    logger.error(f"Кнопки на странице: {btn_info}")
+                    try:
+                        await page.screenshot(path="/tmp/threads_publish_debug.png")
+                    except Exception:
+                        pass
+                    return {"error": f"Не найдена кнопка Опубликовать. Страница: {url_after}. Кнопки: {btn_info}"}
 
-                        // Fallback: последняя активная кнопка в диалоге (обычно "Опубликовать")
-                        const activeBtns = btns.filter(b => !b.disabled && b.type !== 'reset');
-                        if (activeBtns.length > 0) {
-                            const last = activeBtns[activeBtns.length - 1];
-                            last.click();
-                            return 'fallback_last: ' + (last.innerText || last.textContent || '').trim().slice(0, 30);
-                        }
-
-                        return 'NOT_FOUND:' + JSON.stringify(btnInfo.slice(0, 5));
-                    }
-                """)
-
-                logger.info(f"Publish result: {published}")
-                if published and not published.startswith('NOT_FOUND'):
-                    await page.wait_for_timeout(3000)
-                    logger.info(f"✅ Ответ опубликован: {post_url}")
-                    return {"success": True, "via_browser": True}
-                else:
-                    return {"error": f"Не найдена кнопка Опубликовать. Кнопки: {published}"}
+                await publish_locator.click()
+                await page.wait_for_timeout(3000)
+                logger.info(f"✅ Ответ опубликован: {post_url}")
+                return {"success": True, "via_browser": True}
 
             finally:
                 await browser.close()
