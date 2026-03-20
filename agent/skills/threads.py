@@ -163,6 +163,7 @@ async def search_posts(keyword: str, limit: int = 20) -> dict:
     """
     Поиск постов в Threads по ключевому слову.
     Требует пермишен threads_keyword_search в Meta Developer.
+    Использует endpoint: GET /{user_id}/threads?q={keyword}
     """
     token = _get_token()
     user_id = _get_user_id()
@@ -171,8 +172,9 @@ async def search_posts(keyword: str, limit: int = 20) -> dict:
         return {"error": "Не настроены токены Threads"}
 
     async with httpx.AsyncClient() as client:
+        # Правильный endpoint для keyword search: /{user_id}/threads с параметром q
         resp = await client.get(
-            f"{THREADS_API_BASE}/threads/search",
+            f"{THREADS_API_BASE}/{user_id}/threads",
             params={
                 "q": keyword,
                 "fields": "id,text,timestamp,like_count,replies_count,username",
