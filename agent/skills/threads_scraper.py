@@ -147,12 +147,18 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
 
 async def reply_via_browser(post_url: str, reply_text: str) -> dict:
     """
-    Отвечает на пост кликая в браузере.
-    Требует THREADS_SESSION_ID в .env для авторизации.
+    Отвечает на пост кликая в браузере Playwright.
+    Требует THREADS_SESSION_ID в .env.
+
+    Флоу (проверено на threads.com):
+    1. Открываем пост → ждём загрузки
+    2. Кликаем иконку-пузырёк (кол-во ответов) — открывается модал "Ответ"
+    3. Кликаем в поле ввода → вводим текст
+    4. Кликаем "Опубликовать"
     """
     cookies = _get_auth_cookies()
     if not cookies:
-        return {"error": "Нет THREADS_SESSION_ID в .env — браузерный reply невозможен. Добавь cookie из threads.net"}
+        return {"error": "Нет THREADS_SESSION_ID в .env — добавь cookie из threads.com DevTools"}
 
     try:
         from playwright.async_api import async_playwright
@@ -166,9 +172,9 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
-                )
+                ),
+                viewport={"width": 1280, "height": 900}
             )
-            # Устанавливаем сессию
             await context.add_cookies(cookies)
             page = await context.new_page()
 
@@ -177,53 +183,84 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
                 await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(3000)
 
-                # Ищем поле для ответа — Threads показывает "Reply to @username..."
-                reply_input = await page.query_selector(
-                    '[placeholder*="Reply" i], [placeholder*="Ответ" i], '
-                    '[aria-label*="Reply" i], [aria-label*="Write a reply" i]'
+                # Шаг 1: Кликаем иконку ответа под постом (пузырёк с цифрой)
+                # На threads.com это SVG иконка рядом с счётчиком ответов
+                reply_btn = await page.query_selector(
+                    'svg[aria-label="Reply"], svg[aria-label="Ответить"], '
+                    '[aria-label="Comment"], [aria-label="Комментарий"]'
                 )
+                if not reply_btn:
+                    # Ищем через evaluate — кнопка рядом с первым постом
+                    reply_btn = await page.evaluate_handle("""
+                        () => {
+                            // Ищем первый reply/comment svg на странице
+                            const svgs = document.querySelectorAll('svg');
+                            for (const svg of svgs) {
+                                const label = svg.getAttribute('aria-label') || '';
+                                if (/reply|comment|ответ/i.test(label)) {
+                                    return svg.closest('button') || svg.parentElement;
+                                }
+                            }
+                            // Fallback: первая кнопка после лайка в блоке поста
+                            const btns = document.querySelectorAll('button');
+                            // Кнопка reply обычно вторая после like
+                            return btns[1] || null;
+                        }
+                    """)
 
-                if not reply_input:
-                    # Кликаем на кнопку comment/reply чтобы раскрыть поле
-                    comment_btn = await page.query_selector(
-                        'svg[aria-label*="Comment" i], svg[aria-label*="Reply" i], '
-                        '[data-testid*="comment"], [data-testid*="reply"]'
-                    )
-                    if comment_btn:
-                        await comment_btn.click()
-                        await page.wait_for_timeout(2000)
-                        reply_input = await page.query_selector(
-                            '[placeholder*="Reply" i], [contenteditable="true"]'
-                        )
+                if reply_btn:
+                    await reply_btn.click()
+                    await page.wait_for_timeout(2000)
 
-                if not reply_input:
-                    # Последняя попытка — любой contenteditable
-                    reply_input = await page.query_selector('[contenteditable="true"]')
+                # Шаг 2: Ждём модал "Ответ" и находим поле ввода
+                # На threads.com поле — это div[contenteditable] с placeholder "Ответьте @username..."
+                input_field = None
+                for selector in [
+                    '[contenteditable="true"][data-lexical-editor]',
+                    '[contenteditable="true"]',
+                    'textarea',
+                ]:
+                    try:
+                        input_field = await page.wait_for_selector(selector, timeout=5000)
+                        if input_field:
+                            break
+                    except Exception:
+                        continue
 
-                if not reply_input:
-                    return {"error": "Не найдено поле ввода ответа (возможно не залогинен в Threads)"}
+                if not input_field:
+                    return {"error": "Не найдено поле ввода ответа (не залогинен или изменился UI)"}
 
-                await reply_input.click()
+                await input_field.click()
                 await page.wait_for_timeout(500)
-                await reply_input.fill(reply_text)
+                # Вводим текст через keyboard (работает с contenteditable)
+                await page.keyboard.type(reply_text, delay=30)
                 await page.wait_for_timeout(1000)
 
-                # Кнопка Post
-                post_btn = await page.query_selector(
-                    'button:has-text("Post"), button:has-text("Reply"), '
-                    '[data-testid*="post-button"], [aria-label*="Post" i]'
+                # Шаг 3: Кнопка "Опубликовать" / "Post"
+                publish_btn = await page.query_selector(
+                    'button:has-text("Опубликовать"), button:has-text("Post"), '
+                    'button:has-text("Reply"), [data-testid="new-post-submit-button"]'
                 )
-                if not post_btn:
-                    # Ищем активную кнопку рядом с полем ввода
-                    post_btn = await page.query_selector('button[type="submit"]')
+                if not publish_btn:
+                    # Ищем любую активную кнопку в диалоге
+                    publish_btn = await page.evaluate_handle("""
+                        () => {
+                            const btns = document.querySelectorAll('button');
+                            for (const b of btns) {
+                                const t = b.innerText.trim();
+                                if (/опублик|^post$|^reply$/i.test(t) && !b.disabled) return b;
+                            }
+                            return null;
+                        }
+                    """)
 
-                if post_btn:
-                    await post_btn.click()
-                    await page.wait_for_timeout(2000)
-                    logger.info(f"Ответ опубликован через браузер: {post_url}")
+                if publish_btn:
+                    await publish_btn.click()
+                    await page.wait_for_timeout(3000)
+                    logger.info(f"✅ Ответ опубликован: {post_url}")
                     return {"success": True, "via_browser": True}
                 else:
-                    return {"error": "Не найдена кнопка Post для публикации ответа"}
+                    return {"error": "Не найдена кнопка Опубликовать"}
 
             finally:
                 await browser.close()
