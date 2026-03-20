@@ -11,7 +11,7 @@ import random
 import anthropic
 import os
 
-from agent.skills.threads import post_text, reply_to_post, search_posts, get_my_username
+from agent.skills.threads import post_text, reply_to_post, get_my_posts, get_post_replies, get_my_username
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     format_price_data_for_prompt, format_best_deals_for_prompt, SITE_LINK
@@ -153,78 +153,85 @@ async def _generate_reply(target_text: str) -> str:
     return text
 
 
-async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
-    """Только ответы на чужие посты — без публикации своих"""
-    settings = get_autopilot_settings()
-    keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане"])
-
-    # Узнаём свой username чтобы не отвечать самому себе
+async def _collect_reply_candidates(count: int) -> list[dict]:
+    """
+    Собирает комментарии под своими постами для ответа.
+    Threads API не поддерживает глобальный поиск — отвечаем тем,
+    кто уже написал нам.
+    """
     my_username = await get_my_username()
-    logger.info(f"Мой username: {my_username}")
+    posts_data = await get_my_posts(limit=20)
+    my_posts = posts_data.get("data", [])
 
-    if notify_fn:
-        await notify_fn(f"Ищу посты по ключевым словам:\n{', '.join(keywords)}")
+    # Только посты с комментариями
+    posts_with_replies = [p for p in my_posts if (p.get("replies_count") or 0) > 0]
+    logger.info(f"Своих постов с комментариями: {len(posts_with_replies)}")
 
-    candidate_posts = []
-    search_errors = []
+    candidates = []
     seen_ids = set()
-    for keyword in keywords:
+
+    for post in posts_with_replies:
+        if len(candidates) >= count * 2:
+            break
         try:
-            data = await search_posts(keyword, limit=20)
-            if data.get("error"):
-                err_msg = f"'{keyword}': {data['error']}"
-                search_errors.append(err_msg)
-            else:
-                found = data.get("data", [])
-                logger.info(f"Поиск '{keyword}': найдено {len(found)} постов")
-                for p in found:
-                    post_id = p.get("id")
-                    username = p.get("username", "")
-                    # Фильтруем: только чужие, только новые, только с текстом
-                    if (post_id
-                            and post_id not in seen_ids
-                            and not is_already_replied(post_id)
-                            and p.get("text")
-                            and username != my_username):
-                        candidate_posts.append(p)
-                        seen_ids.add(post_id)
+            replies_data = await get_post_replies(post["id"], limit=20)
+            replies = replies_data.get("data", [])
+            for r in replies:
+                reply_id = r.get("id")
+                username = r.get("username", "")
+                # Пропускаем свои же ответы и уже отвеченные
+                if (reply_id
+                        and reply_id not in seen_ids
+                        and not is_already_replied(reply_id)
+                        and r.get("text")
+                        and username != my_username):
+                    # Добавляем контекст: на какой пост это ответ
+                    r["_parent_post_text"] = post.get("text", "")
+                    candidates.append(r)
+                    seen_ids.add(reply_id)
         except Exception as e:
-            search_errors.append(f"'{keyword}': {e}")
+            logger.warning(f"Не смог получить реплаи для {post['id']}: {e}")
 
-    if search_errors and notify_fn:
-        await notify_fn(f"⚠️ Ошибки поиска:\n" + "\n".join(search_errors))
-
-    if not candidate_posts:
-        note = "своих постов" if my_username else "постов"
-        if notify_fn:
-            await notify_fn(
-                f"Не найдено чужих постов для ответов.\n"
-                f"(Поиск вернул только {note} или результатов нет)"
-            )
-        return {"replies_published": 0, "errors": search_errors}
-
-    # Показываем что нашли — для диагностики
-    if notify_fn:
-        sample = candidate_posts[:3]
-        sample_info = "\n".join(
-            [f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in sample]
-        )
-        await notify_fn(f"Найдено {len(candidate_posts)} чужих постов. Примеры:\n{sample_info}")
-
-    candidate_posts.sort(
+    # Сортируем по лайкам
+    candidates.sort(
         key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0),
         reverse=True
     )
-    to_reply = candidate_posts[:count]
+    return candidates[:count]
+
+
+async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
+    """
+    Отвечает на комментарии под своими постами.
+    (Threads API не поддерживает глобальный keyword search чужих постов)
+    """
+    if notify_fn:
+        await notify_fn("Ищу комментарии под своими постами...")
+
+    candidates = await _collect_reply_candidates(count)
+
+    if not candidates:
+        if notify_fn:
+            await notify_fn(
+                "Нет новых комментариев для ответа.\n"
+                "Ответы появятся когда кто-нибудь прокомментирует посты."
+            )
+        return {"replies_published": 0, "errors": []}
 
     if notify_fn:
-        await notify_fn(f"Найдено {len(to_reply)} постов. Начинаю отвечать...")
+        sample_info = "\n".join(
+            [f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in candidates[:3]]
+        )
+        await notify_fn(f"Найдено {len(candidates)} комментариев. Начинаю отвечать:\n{sample_info}")
 
     results = {"replies_published": 0, "errors": []}
 
-    for i, target in enumerate(to_reply):
+    for i, target in enumerate(candidates):
         try:
-            reply_text = await _generate_reply(target["text"])
+            # Генерируем ответ с учётом контекста родительского поста
+            context = target.get("_parent_post_text", "")
+            combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
+            reply_text = await _generate_reply(combined_text)
             result = await reply_to_post(target["id"], reply_text)
 
             if result.get("success"):
@@ -232,7 +239,7 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
                 results["replies_published"] += 1
                 if notify_fn:
                     await notify_fn(
-                        f"✅ Ответ {i+1}/{len(to_reply)} → @{target.get('username','?')}:\n"
+                        f"✅ Ответ {i+1}/{len(candidates)} → @{target.get('username','?')}:\n"
                         f"{reply_text[:120]}..."
                     )
             else:
@@ -243,14 +250,14 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
         except Exception as e:
             results["errors"].append(f"Ответ {i+1}: {e}")
 
-        if i < len(to_reply) - 1:
+        if i < len(candidates) - 1:
             delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
             await asyncio.sleep(delay)
 
     if notify_fn:
         await notify_fn(
             f"Ответы завершены!\n"
-            f"Опубликовано: {results['replies_published']}/{len(to_reply)}\n"
+            f"Опубликовано: {results['replies_published']}/{len(candidates)}\n"
             + (f"Ошибок: {len(results['errors'])}" if results["errors"] else "")
         )
     return results
@@ -305,52 +312,18 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 await notify_fn(f"Пауза {delay//60} мин перед следующим постом...")
             await asyncio.sleep(delay)
 
-    # ── 2. Ответы на чужие посты ──────────────────────────
-    my_username = await get_my_username()
-    logger.info(f"Мой username: {my_username}")
+    # ── 2. Ответы на комментарии под своими постами ───────
+    if notify_fn:
+        await notify_fn("Ищу комментарии под своими постами...")
 
-    candidate_posts = []
-    search_errors = []
-    seen_ids = set()
-    for keyword in keywords:
-        try:
-            data = await search_posts(keyword, limit=15)
-            if data.get("error"):
-                err_msg = f"Поиск '{keyword}': {data['error']}"
-                logger.warning(err_msg)
-                search_errors.append(err_msg)
-            else:
-                found = data.get("data", [])
-                logger.info(f"Поиск '{keyword}': найдено {len(found)} постов")
-                for p in found:
-                    post_id = p.get("id")
-                    username = p.get("username", "")
-                    if (post_id
-                            and post_id not in seen_ids
-                            and not is_already_replied(post_id)
-                            and p.get("text")
-                            and username != my_username):
-                        candidate_posts.append(p)
-                        seen_ids.add(post_id)
-        except Exception as e:
-            logger.warning(f"Поиск '{keyword}': {e}")
-            search_errors.append(str(e))
-
-    # Сортируем по вовлечённости
-    candidate_posts.sort(
-        key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0),
-        reverse=True
-    )
-    to_reply = candidate_posts[:reply_count]
+    to_reply = await _collect_reply_candidates(reply_count)
 
     if not to_reply:
-        if search_errors:
-            msg = f"Ошибка поиска постов:\n{chr(10).join(search_errors[:2])}"
-        else:
-            msg = "Нет новых постов для ответов"
         if notify_fn:
-            await notify_fn(msg)
+            await notify_fn("Нет новых комментариев для ответа.")
     else:
+        if notify_fn:
+            await notify_fn(f"Найдено {len(to_reply)} комментариев. Начинаю отвечать...")
         for i, target in enumerate(to_reply):
             try:
                 delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
@@ -358,7 +331,9 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                     await notify_fn(f"Пауза {delay//60} мин перед ответом {i+1}...")
                 await asyncio.sleep(delay)
 
-                reply_text = await _generate_reply(target["text"])
+                context = target.get("_parent_post_text", "")
+                combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
+                reply_text = await _generate_reply(combined_text)
                 result = await reply_to_post(target["id"], reply_text)
 
                 if result.get("success"):

@@ -159,37 +159,38 @@ async def get_my_posts(limit: int = 10) -> dict:
         return resp.json()
 
 
-async def search_posts(keyword: str, limit: int = 20) -> dict:
+async def get_post_replies(media_id: str, limit: int = 10) -> dict:
     """
-    Поиск публичных постов в Threads по ключевому слову.
-    Требует пермишен threads_keyword_search в Meta Developer.
-    Использует глобальный endpoint: GET /search?q={keyword}&type=thread
+    Получить ответы (комментарии) на конкретный пост.
+    Endpoint: GET /{media_id}/replies
     """
     token = _get_token()
-    user_id = _get_user_id()
 
-    if not token or not user_id:
-        return {"error": "Не настроены токены Threads"}
+    if not token:
+        return {"error": "Не настроен THREADS_ACCESS_TOKEN"}
 
     async with httpx.AsyncClient() as client:
-        # Глобальный поиск чужих публичных постов по всему Threads
         resp = await client.get(
-            f"{THREADS_API_BASE}/search",
+            f"{THREADS_API_BASE}/{media_id}/replies",
             params={
-                "q": keyword,
-                "type": "thread",
-                "fields": "id,text,timestamp,like_count,replies_count,username",
+                "fields": "id,text,timestamp,username,like_count,replies_count",
                 "limit": limit,
                 "access_token": token,
             }
         )
         if resp.status_code != 200:
-            log_action("threads_search_error", keyword, str(resp.text))
-            return {"error": f"Ошибка поиска: {resp.text}", "keyword": keyword}
+            return {"error": f"Ошибка получения ответов: {resp.text}"}
 
-        data = resp.json()
-        log_action("threads_search", keyword, f"найдено: {len(data.get('data', []))}")
-        return data
+        return resp.json()
+
+
+async def search_posts(keyword: str, limit: int = 20) -> dict:
+    """
+    Threads API не поддерживает глобальный поиск чужих постов.
+    Эта функция возвращает пустой результат — используй get_post_replies().
+    """
+    log_action("threads_search_skipped", keyword, "global search not available in Threads API")
+    return {"data": [], "note": "Threads API не поддерживает поиск чужих постов"}
 
 
 async def get_my_username() -> str | None:

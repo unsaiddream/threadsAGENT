@@ -201,29 +201,37 @@ async def run_replies_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def check_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверить работу поиска Threads — диагностика threads_keyword_search"""
+    """Диагностика: показать комментарии под своими постами"""
     if not is_authorized(update):
         return
 
-    from agent.skills.threads import search_posts
+    from agent.skills.threads import get_my_posts, get_post_replies
 
-    await update.message.reply_text("Проверяю поиск Threads API...")
+    await update.message.reply_text("Проверяю комментарии под своими постами...")
 
-    keyword = "цены"
-    data = await search_posts(keyword, limit=3)
+    posts_data = await get_my_posts(limit=10)
+    posts = posts_data.get("data", [])
+    posts_with_replies = [p for p in posts if (p.get("replies_count") or 0) > 0]
 
-    if data.get("error"):
+    if not posts_with_replies:
         await update.message.reply_text(
-            f"❌ Ошибка поиска:\n{data['error']}\n\n"
-            f"Нужно перегенерировать access token с пермишеном threads_keyword_search"
+            "Нет постов с комментариями.\n"
+            "Как только кто-то напишет под постами — автопилот начнёт отвечать."
         )
-    else:
-        posts = data.get("data", [])
-        await update.message.reply_text(
-            f"✅ Поиск работает!\n"
-            f"По запросу «{keyword}» найдено: {len(posts)} постов\n\n"
-            + ("\n".join([f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in posts[:3]]) if posts else "Постов нет")
-        )
+        return
+
+    # Показываем первый пост с комментариями
+    sample_post = posts_with_replies[0]
+    replies_data = await get_post_replies(sample_post["id"], limit=5)
+    replies = replies_data.get("data", [])
+
+    reply_lines = "\n".join([f"• @{r.get('username','?')}: {r.get('text','')[:60]}..." for r in replies[:5]])
+    await update.message.reply_text(
+        f"✅ Найдено {len(posts_with_replies)} постов с комментариями.\n\n"
+        f"Пост: {sample_post.get('text','')[:80]}...\n"
+        f"Комментариев: {sample_post.get('replies_count', 0)}\n\n"
+        f"Примеры:\n{reply_lines or 'пусто'}"
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
