@@ -12,20 +12,19 @@ import os
 
 logger = logging.getLogger(__name__)
 
-SEARCH_URL = "https://www.threads.net/search?q={query}&serp_type=default"
+SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default"
 
 
 def _get_auth_cookies() -> list[dict]:
     """
-    Cookies для авторизации в threads.net.
-    Получи sessionid: DevTools → Application → Cookies → threads.net → sessionid
+    Cookies для авторизации в threads.com (сайт переехал с threads.net на threads.com).
     """
     session_id = os.getenv("THREADS_SESSION_ID", "")
     if not session_id:
         return []
     return [
-        {"name": "sessionid", "value": session_id, "domain": ".threads.net", "path": "/"},
-        {"name": "sessionid", "value": session_id, "domain": "www.threads.net", "path": "/"},
+        {"name": "sessionid", "value": session_id, "domain": ".threads.com", "path": "/"},
+        {"name": "sessionid", "value": session_id, "domain": "www.threads.com", "path": "/"},
     ]
 
 
@@ -53,7 +52,7 @@ def _extract_posts_recursive(data, posts: list, seen_ids: set, max_posts: int):
                 "text": text[:1000],
                 "username": username,
                 "shortcode": shortcode,
-                "post_url": f"https://www.threads.net/@{username}/post/{shortcode}" if shortcode else "",
+                "post_url": f"https://www.threads.com/@{username}/post/{shortcode}" if shortcode else "",
                 "like_count": data.get("like_count", 0),
                 "replies_count": data.get("reply_count") or data.get("replies_count", 0),
                 "via_browser": False,  # реальный pk — используем Threads API
@@ -181,53 +180,90 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
             try:
                 logger.info(f"Открываю пост: {post_url}")
                 await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(3500)
 
-                # Шаг 1: Кликаем иконку ответа под постом (пузырёк с цифрой)
-                # На threads.com это SVG иконка рядом с счётчиком ответов
-                reply_btn = await page.query_selector(
-                    'svg[aria-label="Reply"], svg[aria-label="Ответить"], '
-                    '[aria-label="Comment"], [aria-label="Комментарий"]'
-                )
-                if not reply_btn:
-                    # Ищем через evaluate — кнопка рядом с первым постом
-                    reply_btn = await page.evaluate_handle("""
-                        () => {
-                            // Ищем первый reply/comment svg на странице
-                            const svgs = document.querySelectorAll('svg');
-                            for (const svg of svgs) {
-                                const label = svg.getAttribute('aria-label') || '';
-                                if (/reply|comment|ответ/i.test(label)) {
-                                    return svg.closest('button') || svg.parentElement;
-                                }
+                # Проверяем авторизацию — ищем аватар или иконку профиля
+                is_logged_in = await page.evaluate("""
+                    () => {
+                        // На threads.com залогиненный юзер видит nav с иконкой профиля
+                        const nav = document.querySelector('a[href*="/profile"], a[href="/"], [aria-label="Главная"]');
+                        return !!nav;
+                    }
+                """)
+                if not is_logged_in:
+                    logger.warning("Threads: не залогинен (sessionid не принят)")
+
+                # Шаг 1: Кликаем иконку ответа (пузырёк) — она вторая кнопка в блоке действий
+                # На threads.com пузырёк — SVG без aria-label, второй в ряду кнопок поста
+                clicked = await page.evaluate("""
+                    () => {
+                        // Кнопки в ряду: Like | Reply | Repost | Share
+                        // Reply (пузырёк) — обычно вторая кнопка в первом article/post
+                        const article = document.querySelector('article') ||
+                                        document.querySelector('[data-pressable-container]') ||
+                                        document.querySelector('div[role="article"]');
+
+                        const containers = article
+                            ? article.querySelectorAll('div[role="button"], button')
+                            : document.querySelectorAll('div[role="button"], button');
+
+                        // Ищем по aria-label
+                        for (const el of containers) {
+                            const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                            if (label.includes('reply') || label.includes('ответ') || label.includes('comment')) {
+                                el.click();
+                                return 'clicked_by_label: ' + label;
                             }
-                            // Fallback: первая кнопка после лайка в блоке поста
-                            const btns = document.querySelectorAll('button');
-                            // Кнопка reply обычно вторая после like
-                            return btns[1] || null;
                         }
-                    """)
 
-                if reply_btn:
-                    await reply_btn.click()
-                    await page.wait_for_timeout(2000)
+                        // Fallback: ищем SVG с путём похожим на пузырёк
+                        const svgs = document.querySelectorAll('svg');
+                        for (const svg of svgs) {
+                            const parent = svg.closest('button') || svg.closest('[role="button"]');
+                            if (!parent) continue;
+                            const label = (parent.getAttribute('aria-label') || svg.getAttribute('aria-label') || '').toLowerCase();
+                            if (label.includes('reply') || label.includes('ответ') || label.includes('comment')) {
+                                parent.click();
+                                return 'clicked_svg_parent: ' + label;
+                            }
+                        }
 
-                # Шаг 2: Ждём модал "Ответ" и находим поле ввода
-                # На threads.com поле — это div[contenteditable] с placeholder "Ответьте @username..."
+                        // Последний fallback: вторая кнопка в первом ряду (like=1, reply=2)
+                        const allBtns = document.querySelectorAll('button');
+                        if (allBtns.length >= 2) {
+                            allBtns[1].click();
+                            return 'clicked_btn[1]';
+                        }
+                        return null;
+                    }
+                """)
+                logger.info(f"Reply click: {clicked}")
+                await page.wait_for_timeout(2000)
+
+                # Шаг 2: Ждём модал "Ответ" — ищем contenteditable появившийся ПОСЛЕ клика
+                # Модал содержит текст "Ответьте @username" или "Reply to @username"
                 input_field = None
                 for selector in [
-                    '[contenteditable="true"][data-lexical-editor]',
+                    'p[data-placeholder*="Ответьте"]',
+                    'p[data-placeholder*="Reply"]',
+                    '[contenteditable="true"][data-lexical-editor="true"]',
                     '[contenteditable="true"]',
-                    'textarea',
                 ]:
                     try:
-                        input_field = await page.wait_for_selector(selector, timeout=5000)
+                        input_field = await page.wait_for_selector(selector, timeout=6000)
                         if input_field:
+                            logger.info(f"Поле найдено: {selector}")
                             break
                     except Exception:
                         continue
 
                 if not input_field:
+                    # Делаем скриншот для диагностики
+                    try:
+                        await page.screenshot(path="/tmp/threads_reply_debug.png")
+                        logger.error("Debug screenshot: /tmp/threads_reply_debug.png")
+                    except Exception:
+                        pass
                     return {"error": "Не найдено поле ввода ответа (не залогинен или изменился UI)"}
 
                 await input_field.click()
