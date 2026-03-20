@@ -21,8 +21,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-MIN_DELAY_SEC = 4 * 60
-MAX_DELAY_SEC = 12 * 60
+MIN_DELAY_SEC = 30
+MAX_DELAY_SEC = 90
 
 # Продукты для мониторинга цен каждый день
 DAILY_PRODUCTS = [
