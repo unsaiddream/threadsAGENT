@@ -133,10 +133,10 @@ async def _generate_reply(target_text: str) -> str:
     return text
 
 
-async def run_autopilot(notify_fn=None) -> dict:
+async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     """Главная функция автопилота"""
     settings = get_autopilot_settings()
-    if not settings.get("enabled"):
+    if not force and not settings.get("enabled"):
         return {"skipped": "автопилот выключен"}
 
     niche = settings.get("niche", "цены на продукты и товары в Казахстане")

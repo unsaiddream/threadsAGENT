@@ -160,14 +160,14 @@ async def run_autopilot_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(
         "Запускаю автопилот...\n"
         "Буду присылать уведомления по ходу.\n"
-        "(Займёт 1-2 часа из-за задержек между постами)"
+        "(Займёт ~10-15 минут)"
     )
 
     from agent.autopilot import run_autopilot
     import asyncio
 
-    # Запускаем в фоне чтобы не блокировать бот
-    asyncio.create_task(run_autopilot(notify_fn=notify))
+    # force=True — ручной запуск работает даже если автопилот выключен
+    asyncio.create_task(run_autopilot(notify_fn=notify, force=True))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
