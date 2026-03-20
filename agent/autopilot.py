@@ -12,7 +12,7 @@ import anthropic
 import os
 
 from agent.skills.threads import post_text, reply_to_post, get_my_posts, get_post_replies, get_my_username
-from agent.skills.threads_scraper import search_trending_posts
+from agent.skills.threads_scraper import search_trending_posts, reply_via_browser
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     format_price_data_for_prompt, format_best_deals_for_prompt, SITE_LINK
@@ -121,6 +121,18 @@ async def _generate_own_posts(price_context: str, niche: str, count: int) -> lis
         final.append(p)
 
     return final
+
+
+async def _do_reply(target: dict, reply_text: str) -> dict:
+    """
+    Отправляет ответ:
+    - Если via_browser=True (shortcode из DOM) → Playwright браузерный reply
+    - Иначе → официальный Threads API reply (по реальному pk)
+    """
+    if target.get("via_browser") and target.get("post_url"):
+        return await reply_via_browser(target["post_url"], reply_text)
+    else:
+        return await reply_to_post(target["id"], reply_text)
 
 
 async def _generate_reply(target_text: str) -> str:
@@ -234,14 +246,15 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
             context = target.get("_parent_post_text", "")
             combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
             reply_text = await _generate_reply(combined_text)
-            result = await reply_to_post(target["id"], reply_text)
+            result = await _do_reply(target, reply_text)
 
             if result.get("success"):
                 mark_replied(target["id"])
                 results["replies_published"] += 1
+                mode = "🌐" if target.get("via_browser") else "📡"
                 if notify_fn:
                     await notify_fn(
-                        f"✅ Ответ {i+1}/{len(candidates)} → @{target.get('username','?')}:\n"
+                        f"✅ {mode} Ответ {i+1}/{len(candidates)} → @{target.get('username','?')}:\n"
                         f"{reply_text[:120]}..."
                     )
             else:
@@ -337,13 +350,14 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 context = target.get("_parent_post_text", "")
                 combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
                 reply_text = await _generate_reply(combined_text)
-                result = await reply_to_post(target["id"], reply_text)
+                result = await _do_reply(target, reply_text)
 
                 if result.get("success"):
                     mark_replied(target["id"])
                     results["replies_published"] += 1
+                    mode = "🌐" if target.get("via_browser") else "📡"
                     if notify_fn:
-                        await notify_fn(f"Ответ {i+1}/{reply_count} на @{target.get('username','?')}:\n{reply_text[:120]}...")
+                        await notify_fn(f"✅ {mode} Ответ {i+1}/{reply_count} на @{target.get('username','?')}:\n{reply_text[:120]}...")
                 else:
                     results["errors"].append(f"Ответ {i+1}: {result.get('error')}")
             except Exception as e:
