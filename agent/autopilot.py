@@ -11,7 +11,7 @@ import random
 import anthropic
 import os
 
-from agent.skills.threads import post_text, reply_to_post, search_posts
+from agent.skills.threads import post_text, reply_to_post, search_posts, get_my_username
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     format_price_data_for_prompt, format_best_deals_for_prompt, SITE_LINK
@@ -158,11 +158,16 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     settings = get_autopilot_settings()
     keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане"])
 
+    # Узнаём свой username чтобы не отвечать самому себе
+    my_username = await get_my_username()
+    logger.info(f"Мой username: {my_username}")
+
     if notify_fn:
         await notify_fn(f"Ищу посты по ключевым словам:\n{', '.join(keywords)}")
 
     candidate_posts = []
     search_errors = []
+    seen_ids = set()
     for keyword in keywords:
         try:
             data = await search_posts(keyword, limit=20)
@@ -173,8 +178,16 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
                 found = data.get("data", [])
                 logger.info(f"Поиск '{keyword}': найдено {len(found)} постов")
                 for p in found:
-                    if p.get("id") and not is_already_replied(p["id"]) and p.get("text"):
+                    post_id = p.get("id")
+                    username = p.get("username", "")
+                    # Фильтруем: только чужие, только новые, только с текстом
+                    if (post_id
+                            and post_id not in seen_ids
+                            and not is_already_replied(post_id)
+                            and p.get("text")
+                            and username != my_username):
                         candidate_posts.append(p)
+                        seen_ids.add(post_id)
         except Exception as e:
             search_errors.append(f"'{keyword}': {e}")
 
@@ -182,9 +195,21 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
         await notify_fn(f"⚠️ Ошибки поиска:\n" + "\n".join(search_errors))
 
     if not candidate_posts:
+        note = "своих постов" if my_username else "постов"
         if notify_fn:
-            await notify_fn("Не найдено новых постов для ответов.")
+            await notify_fn(
+                f"Не найдено чужих постов для ответов.\n"
+                f"(Поиск вернул только {note} или результатов нет)"
+            )
         return {"replies_published": 0, "errors": search_errors}
+
+    # Показываем что нашли — для диагностики
+    if notify_fn:
+        sample = candidate_posts[:3]
+        sample_info = "\n".join(
+            [f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in sample]
+        )
+        await notify_fn(f"Найдено {len(candidate_posts)} чужих постов. Примеры:\n{sample_info}")
 
     candidate_posts.sort(
         key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0),
@@ -281,8 +306,12 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
             await asyncio.sleep(delay)
 
     # ── 2. Ответы на чужие посты ──────────────────────────
+    my_username = await get_my_username()
+    logger.info(f"Мой username: {my_username}")
+
     candidate_posts = []
     search_errors = []
+    seen_ids = set()
     for keyword in keywords:
         try:
             data = await search_posts(keyword, limit=15)
@@ -294,8 +323,15 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 found = data.get("data", [])
                 logger.info(f"Поиск '{keyword}': найдено {len(found)} постов")
                 for p in found:
-                    if p.get("id") and not is_already_replied(p["id"]) and p.get("text"):
+                    post_id = p.get("id")
+                    username = p.get("username", "")
+                    if (post_id
+                            and post_id not in seen_ids
+                            and not is_already_replied(post_id)
+                            and p.get("text")
+                            and username != my_username):
                         candidate_posts.append(p)
+                        seen_ids.add(post_id)
         except Exception as e:
             logger.warning(f"Поиск '{keyword}': {e}")
             search_errors.append(str(e))

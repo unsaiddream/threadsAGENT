@@ -191,6 +191,24 @@ async def search_posts(keyword: str, limit: int = 20) -> dict:
         return data
 
 
+async def get_my_username() -> str | None:
+    """Получить username текущего аккаунта Threads"""
+    token = _get_token()
+    user_id = _get_user_id()
+
+    if not token or not user_id:
+        return None
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{THREADS_API_BASE}/{user_id}",
+            params={"fields": "username", "access_token": token}
+        )
+        if resp.status_code == 200:
+            return resp.json().get("username")
+    return None
+
+
 async def get_insights(media_id: str) -> dict:
     """Получить статистику поста"""
     token = _get_token()
