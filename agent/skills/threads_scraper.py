@@ -17,15 +17,28 @@ SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default"
 
 def _get_auth_cookies() -> list[dict]:
     """
-    Cookies для авторизации в threads.com (сайт переехал с threads.net на threads.com).
+    Cookies для авторизации в threads.com.
+    Все 5 cookies нужны — Threads проверяет ig_did, mid, csrftoken + sessionid.
     """
     session_id = os.getenv("THREADS_SESSION_ID", "")
     if not session_id:
         return []
-    return [
-        {"name": "sessionid", "value": session_id, "domain": ".threads.com", "path": "/"},
-        {"name": "sessionid", "value": session_id, "domain": "www.threads.com", "path": "/"},
+
+    cookies = []
+    cookie_defs = [
+        ("sessionid",  "THREADS_SESSION_ID"),
+        ("csrftoken",  "THREADS_CSRF"),
+        ("ds_user_id", "THREADS_DS_USER"),
+        ("ig_did",     "THREADS_IG_DID"),
+        ("mid",        "THREADS_MID"),
     ]
+    for name, env_key in cookie_defs:
+        value = os.getenv(env_key, "")
+        if value:
+            cookies.append({"name": name, "value": value, "domain": ".threads.com", "path": "/"})
+            cookies.append({"name": name, "value": value, "domain": ".instagram.com", "path": "/"})
+
+    return cookies
 
 
 def _extract_posts_recursive(data, posts: list, seen_ids: set, max_posts: int):
