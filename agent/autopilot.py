@@ -12,6 +12,7 @@ import anthropic
 import os
 
 from agent.skills.threads import post_text, reply_to_post, get_my_posts, get_post_replies, get_my_username
+from agent.skills.threads_scraper import search_trending_posts
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     format_price_data_for_prompt, format_best_deals_for_prompt, SITE_LINK
@@ -153,76 +154,77 @@ async def _generate_reply(target_text: str) -> str:
     return text
 
 
-async def _collect_reply_candidates(count: int) -> list[dict]:
+async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dict]:
     """
-    Собирает комментарии под своими постами для ответа.
-    Threads API не поддерживает глобальный поиск — отвечаем тем,
-    кто уже написал нам.
+    Ищет трендовые посты по ключевым словам через Playwright scraper.
+    Fallback: комментарии под своими постами если scraper не нашёл ничего.
     """
     my_username = await get_my_username()
+
+    # 1. Ищем чужие посты через браузер
+    scraped = await search_trending_posts(keywords, limit=count * 2)
+
+    # Фильтруем: только чужие и ещё не отвеченные
+    candidates = [
+        p for p in scraped
+        if not is_already_replied(p["id"]) and p.get("username") != my_username
+    ]
+
+    if candidates:
+        logger.info(f"Scraper нашёл {len(candidates)} постов для ответов")
+        return candidates[:count]
+
+    # 2. Fallback: отвечаем на комментарии под своими постами
+    logger.info("Scraper не нашёл постов — используем комментарии под своими постами")
     posts_data = await get_my_posts(limit=20)
     my_posts = posts_data.get("data", [])
-
-    # Только посты с комментариями
     posts_with_replies = [p for p in my_posts if (p.get("replies_count") or 0) > 0]
-    logger.info(f"Своих постов с комментариями: {len(posts_with_replies)}")
 
-    candidates = []
+    fallback = []
     seen_ids = set()
-
     for post in posts_with_replies:
-        if len(candidates) >= count * 2:
+        if len(fallback) >= count:
             break
         try:
             replies_data = await get_post_replies(post["id"], limit=20)
-            replies = replies_data.get("data", [])
-            for r in replies:
-                reply_id = r.get("id")
-                username = r.get("username", "")
-                # Пропускаем свои же ответы и уже отвеченные
-                if (reply_id
-                        and reply_id not in seen_ids
-                        and not is_already_replied(reply_id)
+            for r in replies_data.get("data", []):
+                rid = r.get("id")
+                if (rid and rid not in seen_ids
+                        and not is_already_replied(rid)
                         and r.get("text")
-                        and username != my_username):
-                    # Добавляем контекст: на какой пост это ответ
+                        and r.get("username") != my_username):
                     r["_parent_post_text"] = post.get("text", "")
-                    candidates.append(r)
-                    seen_ids.add(reply_id)
+                    fallback.append(r)
+                    seen_ids.add(rid)
         except Exception as e:
-            logger.warning(f"Не смог получить реплаи для {post['id']}: {e}")
+            logger.warning(f"Fallback replies error {post['id']}: {e}")
 
-    # Сортируем по лайкам
-    candidates.sort(
-        key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0),
-        reverse=True
-    )
-    return candidates[:count]
+    return fallback[:count]
 
 
 async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     """
-    Отвечает на комментарии под своими постами.
-    (Threads API не поддерживает глобальный keyword search чужих постов)
+    Ищет трендовые посты по ключевым словам через Playwright scraper
+    и пишет контекстные комментарии со ссылкой на сайт.
     """
-    if notify_fn:
-        await notify_fn("Ищу комментарии под своими постами...")
+    settings = get_autopilot_settings()
+    keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане", "продукты дорожают"])
 
-    candidates = await _collect_reply_candidates(count)
+    if notify_fn:
+        await notify_fn(f"🔍 Ищу трендовые посты через браузер:\n{', '.join(keywords)}")
+
+    candidates = await _collect_reply_candidates(keywords, count)
 
     if not candidates:
         if notify_fn:
-            await notify_fn(
-                "Нет новых комментариев для ответа.\n"
-                "Ответы появятся когда кто-нибудь прокомментирует посты."
-            )
+            await notify_fn("Не найдено постов для ответов.")
         return {"replies_published": 0, "errors": []}
 
     if notify_fn:
         sample_info = "\n".join(
             [f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in candidates[:3]]
         )
-        await notify_fn(f"Найдено {len(candidates)} комментариев. Начинаю отвечать:\n{sample_info}")
+        await notify_fn(f"Найдено {len(candidates)} постов. Начинаю отвечать:\n{sample_info}")
 
     results = {"replies_published": 0, "errors": []}
 
@@ -312,18 +314,19 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 await notify_fn(f"Пауза {delay//60} мин перед следующим постом...")
             await asyncio.sleep(delay)
 
-    # ── 2. Ответы на комментарии под своими постами ───────
+    # ── 2. Ищем трендовые посты и пишем контекстные ответы ─
     if notify_fn:
-        await notify_fn("Ищу комментарии под своими постами...")
+        await notify_fn(f"🔍 Ищу трендовые посты:\n{', '.join(keywords)}")
 
-    to_reply = await _collect_reply_candidates(reply_count)
+    to_reply = await _collect_reply_candidates(keywords, reply_count)
 
     if not to_reply:
         if notify_fn:
-            await notify_fn("Нет новых комментариев для ответа.")
+            await notify_fn("Не найдено постов для ответов.")
     else:
         if notify_fn:
-            await notify_fn(f"Найдено {len(to_reply)} комментариев. Начинаю отвечать...")
+            sample = "\n".join([f"• @{p.get('username','?')}: {p.get('text','')[:50]}..." for p in to_reply[:3]])
+            await notify_fn(f"Найдено {len(to_reply)} постов. Примеры:\n{sample}")
         for i, target in enumerate(to_reply):
             try:
                 delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
