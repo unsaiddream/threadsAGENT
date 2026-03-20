@@ -50,7 +50,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Создавать контент-планы\n"
         "• Генерировать посты под нишу\n"
         "• Планировать публикации\n"
-        "• Автопилот: 5 постов + 5 ответов в день\n\n"
+        "• Автопилот: 5 постов + 10 ответов в день\n\n"
         "Команды:\n"
         "/autopilot — управление автопилотом\n"
         "/posts — последние посты\n"
@@ -82,12 +82,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _format_cost(result: dict) -> str:
+    """Формирует строку с инфо о стоимости запроса"""
+    cost = result.get("cost_usd")
+    model = result.get("model", "")
+    if cost is not None:
+        return f"\n\n─\n💰 ${cost:.4f} · {model}"
+    elif model and model != "error":
+        return f"\n\n─\n🔄 {model} (бесплатно)"
+    return ""
+
+
 async def posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
     await update.message.reply_text("Загружаю посты из Threads...")
-    response = await process_message("Покажи мои последние 10 постов из Threads")
+    result = await process_message("Покажи мои последние 10 постов из Threads")
+    response = result["text"] + _format_cost(result)
     await update.message.reply_text(response)
 
 
@@ -182,12 +194,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        response = await process_message(user_text)
+        result = await process_message(user_text)
+        response = result["text"]
+        cost_line = _format_cost(result)
+
         if len(response) > 4096:
-            for i in range(0, len(response), 4096):
-                await update.message.reply_text(response[i:i+4096])
+            # Разбиваем на части, стоимость добавляем к последней части
+            parts = [response[i:i+4096] for i in range(0, len(response), 4096)]
+            for idx, part in enumerate(parts):
+                if idx == len(parts) - 1:
+                    await update.message.reply_text(part + cost_line)
+                else:
+                    await update.message.reply_text(part)
         else:
-            await update.message.reply_text(response)
+            await update.message.reply_text(response + cost_line)
 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")

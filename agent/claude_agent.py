@@ -235,7 +235,8 @@ async def _run_with_claude(messages: list, system: str) -> str:
                 f"in={total_input_tokens} out={total_output_tokens}",
                 f"~${cost_usd:.4f}"
             )
-            return "\n".join(text_parts) if text_parts else "Готово."
+            text = "\n".join(text_parts) if text_parts else "Готово."
+            return text, cost_usd
 
         # Добавляем ответ ассистента
         messages.append({"role": "assistant", "content": response.content})
@@ -282,21 +283,21 @@ async def _run_with_gemini(user_message: str, history: list, system: str) -> str
     return response.text
 
 
-async def process_message(user_message: str) -> str:
+async def process_message(user_message: str) -> dict:
     """
     Основная точка входа — обработать сообщение пользователя.
-    Пробует Claude, при ошибке падает на Gemini.
+    Возвращает {"text": str, "cost_usd": float | None, "model": str}
     """
     save_message("user", user_message)
     history = get_history(limit=30)
     system = SYSTEM_PROMPT + "\n\n" + get_marketing_context()
 
-    # Пробуем Claude (primary) — инициализируется здесь, после загрузки .env
+    # Пробуем Claude (primary)
     try:
         logger.info("Обработка через Claude...")
-        result = await _run_with_claude(list(history), system)
-        save_message("assistant", result)
-        return result
+        text, cost_usd = await _run_with_claude(list(history), system)
+        save_message("assistant", text)
+        return {"text": text, "cost_usd": cost_usd, "model": "claude-sonnet-4-6"}
 
     except Exception as claude_err:
         logger.warning(f"Claude недоступен ({claude_err}), переключаюсь на Gemini...")
@@ -304,12 +305,13 @@ async def process_message(user_message: str) -> str:
 
         # Gemini fallback
         try:
-            result = await _run_with_gemini(user_message, history, system)
-            save_message("assistant", result)
-            return f"[Gemini fallback]\n\n{result}"
+            text = await _run_with_gemini(user_message, history, system)
+            full_text = f"[Gemini fallback]\n\n{text}"
+            save_message("assistant", full_text)
+            return {"text": full_text, "cost_usd": None, "model": "gemini-2.5-flash"}
 
         except Exception as gemini_err:
             logger.error(f"Gemini тоже недоступен: {gemini_err}")
             error_msg = f"Оба AI недоступны.\nClaude: {claude_err}\nGemini: {gemini_err}"
             save_message("assistant", error_msg)
-            return error_msg
+            return {"text": error_msg, "cost_usd": None, "model": "error"}

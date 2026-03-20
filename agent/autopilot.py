@@ -12,7 +12,10 @@ import anthropic
 import os
 
 from agent.skills.threads import post_text, reply_to_post, search_posts
-from agent.skills.minprice import search_prices, get_trending_products, format_price_data_for_prompt, SITE_LINK
+from agent.skills.minprice import (
+    search_prices, get_trending_products, get_best_deals,
+    format_price_data_for_prompt, format_best_deals_for_prompt, SITE_LINK
+)
 from database.db import (
     get_autopilot_settings, update_autopilot_settings,
     is_already_replied, mark_replied, log_action
@@ -37,10 +40,24 @@ def _claude():
 
 
 async def _fetch_price_context() -> str:
-    """Получает актуальные цены на 3-5 случайных продуктов для контента"""
-    products_to_check = random.sample(DAILY_PRODUCTS, min(5, len(DAILY_PRODUCTS)))
-    all_data = []
+    """
+    Получает актуальные цены для контента:
+    1. Best deals с minprice.kz (товары с максимальной выгодой)
+    2. Случайные продукты из ежедневного списка
+    """
+    parts = []
 
+    # 1. Best deals — лучший материал для вирусных постов
+    try:
+        deals = await get_best_deals(limit=8, min_score=0.10)
+        if deals:
+            parts.append(format_best_deals_for_prompt(deals))
+    except Exception as e:
+        logger.warning(f"Не смог получить best deals: {e}")
+
+    # 2. Случайные продукты для разнообразия
+    products_to_check = random.sample(DAILY_PRODUCTS, min(4, len(DAILY_PRODUCTS)))
+    all_data = []
     for product in products_to_check:
         try:
             results = await search_prices(product, limit=3)
@@ -48,7 +65,10 @@ async def _fetch_price_context() -> str:
         except Exception as e:
             logger.warning(f"Не смог получить цены на {product}: {e}")
 
-    return format_price_data_for_prompt(all_data) if all_data else ""
+    if all_data:
+        parts.append(format_price_data_for_prompt(all_data))
+
+    return "\n\n".join(parts) if parts else ""
 
 
 async def _generate_own_posts(price_context: str, niche: str, count: int) -> list[str]:
@@ -142,7 +162,7 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     niche = settings.get("niche", "цены на продукты и товары в Казахстане")
     keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане"])
     own_count = settings.get("own_posts_count", 5)
-    reply_count = settings.get("reply_posts_count", 5)
+    reply_count = settings.get("reply_posts_count", 10)
 
     results = {"own_published": 0, "replies_published": 0, "errors": []}
 

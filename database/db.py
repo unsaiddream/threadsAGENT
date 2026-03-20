@@ -73,7 +73,7 @@ def init_db():
             enabled INTEGER DEFAULT 0,
             keywords TEXT DEFAULT '["цены на продукты","цены в казахстане","продукты дорожают"]',
             own_posts_count INTEGER DEFAULT 5,
-            reply_posts_count INTEGER DEFAULT 5,
+            reply_posts_count INTEGER DEFAULT 10,
             run_hour INTEGER DEFAULT 10,
             niche TEXT DEFAULT 'цены на продукты и товары в Казахстане',
             last_run TEXT
@@ -82,6 +82,10 @@ def init_db():
     # Вставить дефолтные настройки если ещё нет
     c.execute("""
         INSERT OR IGNORE INTO autopilot_settings (id) VALUES (1)
+    """)
+    # Обновляем reply_posts_count до 10 если он ещё 5 (старое дефолтное значение)
+    c.execute("""
+        UPDATE autopilot_settings SET reply_posts_count=10 WHERE id=1 AND reply_posts_count=5
     """)
 
     # Посты на которые уже отвечали (чтобы не дублировать)
