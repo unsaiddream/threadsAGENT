@@ -1,0 +1,40 @@
+{
+  "name": "minimalprice-threads-agent",
+  "version": "1.0.0",
+  "description": "Автопилот для Threads: публикует посты про цены на продукты в Казахстане и отвечает на релевантные посты со ссылкой на minprice.kz",
+  "entrypoint": "main.py",
+  "runtime": "python3.11",
+  "price_per_call": 0.001,
+  "timeout_seconds": 900,
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["run_autopilot", "run_replies", "post_text"],
+        "description": "Действие агента"
+      },
+      "text": {
+        "type": "string",
+        "description": "Текст поста (только для action=post_text)"
+      },
+      "force": {
+        "type": "boolean",
+        "description": "Запустить даже если автопилот выключен",
+        "default": false
+      }
+    },
+    "required": ["action"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "own_published": { "type": "integer" },
+      "replies_published": { "type": "integer" },
+      "errors": { "type": "array", "items": { "type": "string" } }
+    }
+  },
+  "tags": ["threads", "social-media", "kazakhstan", "prices", "marketing"],
+  "category": "social-media-automation",
+  "uses_agents": []
+}
