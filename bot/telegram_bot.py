@@ -266,6 +266,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка: {str(e)}\n\nПопробуй снова.")
 
 
+async def _setup_bot_commands(app: Application):
+    """Регистрирует команды в меню Telegram (вызывается при старте)."""
+    commands = [
+        BotCommand("run_autopilot", "Запустить автопилот (посты + ответы)"),
+        BotCommand("run_replies",   "Только ответы на трендовые посты"),
+        BotCommand("autopilot_on",  "Включить автопилот по расписанию"),
+        BotCommand("autopilot_off", "Выключить автопилот"),
+        BotCommand("autopilot",     "Статус автопилота"),
+        BotCommand("posts",         "Опубликовать посты прямо сейчас"),
+        BotCommand("check_search",  "Проверить поиск Threads"),
+        BotCommand("clear",         "Очистить историю чата"),
+        BotCommand("help",          "Список команд"),
+    ]
+    await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+
+
 def create_bot() -> Application:
     global _app
 
@@ -273,7 +289,13 @@ def create_bot() -> Application:
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN не задан в .env файле")
 
-    _app = Application.builder().token(token).build()
+    # post_init передаётся в builder — так PTB гарантированно вызовет его при старте
+    _app = (
+        Application.builder()
+        .token(token)
+        .post_init(_setup_bot_commands)
+        .build()
+    )
 
     _app.add_handler(CommandHandler("start", start_command))
     _app.add_handler(CommandHandler("help", help_command))
@@ -287,25 +309,7 @@ def create_bot() -> Application:
     _app.add_handler(CommandHandler("check_search", check_search_command))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Регистрируем notify функцию в планировщике
     from scheduler.scheduler import set_notify_fn
     set_notify_fn(notify)
-
-    # Регистрируем команды в меню Telegram (post_init)
-    async def _set_commands(app: Application):
-        commands = [
-            BotCommand("run_autopilot", "🚀 Запустить автопилот (посты + ответы)"),
-            BotCommand("run_replies", "💬 Только ответы на трендовые посты"),
-            BotCommand("autopilot_on", "✅ Включить автопилот по расписанию"),
-            BotCommand("autopilot_off", "⏸ Выключить автопилот"),
-            BotCommand("autopilot", "📊 Статус автопилота"),
-            BotCommand("posts", "📝 Опубликовать посты прямо сейчас"),
-            BotCommand("check_search", "🔍 Проверить поиск Threads"),
-            BotCommand("clear", "🗑 Очистить историю чата"),
-            BotCommand("help", "❓ Список команд"),
-        ]
-        await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-
-    _app.post_init = _set_commands
 
     return _app
