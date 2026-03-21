@@ -63,22 +63,37 @@ async def run_autopilot_job():
 
 
 def start_scheduler() -> AsyncIOScheduler:
-    """Запустить планировщик"""
+    """
+    Запустить планировщик.
+
+    Расписание по алгоритму Threads 2025 (время UTC = Алматы UTC+5 минус 5):
+    - 05:00 UTC = 10:00 Алматы  — утренний пик (люди едут на работу)
+    - 07:00 UTC = 12:00 Алматы  — обеденный пик
+    - 15:00 UTC = 20:00 Алматы  — вечерний пик (самый высокий охват)
+    - 17:00 UTC = 22:00 Алматы  — поздний вечер (активная аудитория)
+    """
     scheduler = AsyncIOScheduler()
 
     # Каждую минуту — проверяем очередь запланированных постов
     scheduler.add_job(publish_pending_posts, "interval", minutes=1, id="scheduled_posts")
 
-    # Каждый день в 10:00 — автопилот (время можно менять через настройки)
-    scheduler.add_job(
-        run_autopilot_job,
-        "cron",
-        hour=10,
-        minute=0,
-        id="autopilot_daily",
-        misfire_grace_time=3600  # Запустить даже если пропустили до 1 часа
-    )
+    # 4 запуска автопилота в день — пиковые часы по Алматы
+    peak_hours_utc = [
+        (5,  0,  "autopilot_10am"),   # 10:00 Алматы — утро
+        (7,  0,  "autopilot_12pm"),   # 12:00 Алматы — обед
+        (15, 0,  "autopilot_20pm"),   # 20:00 Алматы — вечер (главный пик)
+        (17, 0,  "autopilot_22pm"),   # 22:00 Алматы — поздний вечер
+    ]
+    for hour, minute, job_id in peak_hours_utc:
+        scheduler.add_job(
+            run_autopilot_job,
+            "cron",
+            hour=hour,
+            minute=minute,
+            id=job_id,
+            misfire_grace_time=1800,
+        )
 
     scheduler.start()
-    logger.info("Планировщик запущен (посты: каждую минуту, автопилот: 10:00)")
+    logger.info("Планировщик запущен: 4 запуска/день (10:00, 12:00, 20:00, 22:00 Алматы)")
     return scheduler
