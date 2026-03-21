@@ -25,8 +25,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-MIN_DELAY_SEC = 30
-MAX_DELAY_SEC = 90
+MIN_DELAY_SEC = 45
+MAX_DELAY_SEC = 120
 
 # Продукты для мониторинга цен каждый день
 DAILY_PRODUCTS = [
@@ -167,36 +167,54 @@ def _reply_notify_text(idx: int, total: int, target: dict, reply_text: str, resu
     )
 
 
-async def _generate_reply(target_text: str) -> str:
-    """Генерирует ответ на чужой пост — полезный + ссылка"""
+async def _generate_reply(target_text: str) -> str | None:
+    """
+    Генерирует ответ на чужой пост.
 
-    prompt = f"""Ты автор @minimalprice_kz — сайта где можно сравнить цены на продукты и собрать дешёвую продуктовую корзину в Казахстане.
+    Антиспам-логика:
+    - Ссылка включается только в ~30% случаев, когда пост ПРЯМО про цены/магазины
+    - В остальных случаях — живое вовлечение: вопрос, мнение, факт
+    - Если пост нерелевантен — возвращает None (пропускаем)
+    """
 
-Чужой пост в Threads:
+    prompt = f"""Ты обычный казахстанец в Threads, который ведёт аккаунт @minimalprice_kz про цены на продукты.
+
+Чужой пост:
 "{target_text}"
 
-Твоя задача — выстроить ЛОГИЧЕСКУЮ ЦЕПОЧКУ от темы поста к сайту {SITE_LINK}.
+━━ ОЦЕНИ РЕЛЕВАНТНОСТЬ ━━
+Сначала определи насколько пост связан с едой, продуктами, ценами, магазинами, готовкой, бюджетом.
 
-Как это работает (выбери подходящий вариант):
-• Пост про еду/блюдо → "Кстати, ингредиенты для [блюдо] можно собрать дешевле — на {SITE_LINK} видно где что стоит"
-• Пост про дорогой магазин → "В [магазин] реально дороже, я сам проверял — разница до X0% на одни и те же продукты. {SITE_LINK}"
-• Пост про цены/инфляцию → конкретный факт + где найти дешевле + {SITE_LINK}
-• Пост про готовку дома → "Дома вообще выгоднее если знать где брать — корзину можно собрать на {SITE_LINK}"
-• Пост про праздник/мероприятие → "На [праздник] продукты стоит брать заранее пока не подорожали, сравнить можно тут: {SITE_LINK}"
+Если пост НЕ связан с этим — ответь ТОЛЬКО словом: SKIP
 
-ПРАВИЛА:
-- Сначала живая реакция на сам пост (1 предложение, по теме!)
-- Потом ЛОГИЧНЫЙ мостик к продуктовой корзине или ценам
-- Ссылка {SITE_LINK} — один раз, в конце, органично
-- Звучит как совет от знакомого, не как реклама
-- Максимум 2-3 предложения
+━━ ЕСЛИ СВЯЗАН — выбери тип ответа ━━
 
-Верни ТОЛЬКО текст ответа.
+ТИП A: Живое вовлечение (БЕЗ ссылки) — использовать в 70% случаев
+Используй когда пост про еду/готовку/жизнь, но не прямо про цены магазинов.
+Примеры реакций:
+• Вопрос: "А у тебя в каком районе обычно берёшь?" / "Это домашнее или из магазина?"
+• Мнение: "Да, в последнее время реально всё подорожало, особенно [конкретный продукт из поста]"
+• Факт без рекламы: "Интересно что [конкретная деталь из поста] — у нас в Алматы тоже так"
+• Поддержка: "Точно, [основная мысль поста] — многие не замечают"
+
+ТИП B: Упоминание сайта (СО ссылкой) — использовать только в 30% случаев
+Используй ТОЛЬКО когда пост ПРЯМО про: переплату в магазинах, сравнение цен, где дешевле купить, экономию на продуктах.
+Формат: реакция на пост → конкретная польза от сайта → {SITE_LINK}
+Пример: "Да, в Магнуме реально дороже. Я как-то сравнивал — молоко на 40% разница. Можно глянуть где сейчас дешевле: {SITE_LINK}"
+
+━━ ЖЁСТКИЕ ПРАВИЛА ━━
+- НЕ начинай с "Кстати", "Кстати говоря", "Интересно что"
+- НЕ звучи как рекламный бот — пиши как человек
+- НЕ вставляй ссылку насильно если пост не про цены
+- Максимум 1-2 предложения
+- Разговорный стиль, можно с эмоцией
+
+Верни ТОЛЬКО текст ответа ИЛИ слово SKIP.
 """
 
     response = _claude().messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=300,
+        max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -205,9 +223,11 @@ async def _generate_reply(target_text: str) -> str:
     _generate_reply.total_cost = getattr(_generate_reply, "total_cost", 0) + reply_cost
 
     text = response.content[0].text.strip()
-    # Страховка — если ссылки нет, добавляем одну в конце
-    if SITE_LINK not in text:
-        text = text.rstrip(".") + f" {SITE_LINK}"
+
+    # Если Claude решил что пост нерелевантен — пропускаем
+    if text.upper() == "SKIP" or text.upper().startswith("SKIP"):
+        return None
+
     return text
 
 
@@ -288,19 +308,28 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
 
     results = {"replies_published": 0, "errors": []}
 
+    replied_count = 0
     for i, target in enumerate(candidates):
         try:
             # Генерируем ответ с учётом контекста родительского поста
             context = target.get("_parent_post_text", "")
             combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
             reply_text = await _generate_reply(combined_text)
+
+            # SKIP — Claude посчитал пост нерелевантным
+            if reply_text is None:
+                mark_replied(target["id"])  # помечаем чтобы не трогать снова
+                logger.info(f"SKIP: нерелевантный пост @{target.get('username')}")
+                continue
+
             result = await _do_reply(target, reply_text)
 
             if result.get("success"):
                 mark_replied(target["id"])
                 results["replies_published"] += 1
+                replied_count += 1
                 if notify_fn:
-                    msg = _reply_notify_text(i+1, len(candidates), target, reply_text, result)
+                    msg = _reply_notify_text(replied_count, len(candidates), target, reply_text, result)
                     await notify_fn(msg)
             else:
                 err = result.get("error", "неизвестная ошибка")
@@ -390,6 +419,7 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
         if notify_fn:
             sample = "\n".join([f"• @{p.get('username','?')}: {p.get('text','')[:50]}..." for p in to_reply[:3]])
             await notify_fn(f"Найдено {len(to_reply)} постов. Примеры:\n{sample}")
+        replied_count = 0
         for i, target in enumerate(to_reply):
             try:
                 delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
@@ -400,13 +430,21 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 context = target.get("_parent_post_text", "")
                 combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
                 reply_text = await _generate_reply(combined_text)
+
+                # SKIP — Claude посчитал пост нерелевантным
+                if reply_text is None:
+                    mark_replied(target["id"])
+                    logger.info(f"SKIP: нерелевантный пост @{target.get('username')}")
+                    continue
+
                 result = await _do_reply(target, reply_text)
 
                 if result.get("success"):
                     mark_replied(target["id"])
                     results["replies_published"] += 1
+                    replied_count += 1
                     if notify_fn:
-                        msg = _reply_notify_text(i+1, reply_count, target, reply_text, result)
+                        msg = _reply_notify_text(replied_count, reply_count, target, reply_text, result)
                         await notify_fn(msg)
                 else:
                     results["errors"].append(f"Ответ {i+1}: {result.get('error')}")
