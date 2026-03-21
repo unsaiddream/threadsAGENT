@@ -380,9 +380,14 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                     link_line = f"\n🔗 {permalink}" if permalink else ""
                     await notify_fn(f"📝 Пост {i+1}/{own_count}:\n{post[:200]}...{link_line}")
             else:
-                results["errors"].append(f"Пост {i+1}: {result.get('error')}")
+                err = result.get("error", "неизвестная ошибка")
+                results["errors"].append(f"Пост {i+1}: {err}")
+                if notify_fn:
+                    await notify_fn(f"❌ Пост {i+1} не удался:\n{err}")
         except Exception as e:
             results["errors"].append(f"Пост {i+1}: {e}")
+            if notify_fn:
+                await notify_fn(f"❌ Пост {i+1} exception:\n{e}")
 
         if i < len(own_posts) - 1:
             delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
