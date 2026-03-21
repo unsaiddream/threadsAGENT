@@ -420,15 +420,15 @@ async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[di
 
                 try:
                     url = SEARCH_URL.format(query=keyword.replace(" ", "+"))
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
                     try:
-                        await page.wait_for_selector('a[href*="/post/"]', timeout=8000)
+                        await page.wait_for_selector('a[href*="/post/"]', timeout=5000)
                     except Exception:
                         pass
-                    await page.wait_for_timeout(2000)
-                    for _ in range(3):
+                    await page.wait_for_timeout(1000)
+                    for _ in range(2):
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(1500)
+                        await page.wait_for_timeout(800)
                 except Exception as e:
                     logger.warning(f"Ошибка загрузки '{keyword}': {e}")
                     continue

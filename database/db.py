@@ -87,18 +87,12 @@ def init_db():
     c.execute("""
         UPDATE autopilot_settings SET reply_posts_count=10 WHERE id=1 AND reply_posts_count=5
     """)
-    # Обновляем ключевые слова до максимального списка (всегда перезаписываем)
+    # Оптимизированные ключевые слова: 5 широких → быстрый поиск (~1 мин вместо 5+)
     import json as _json
-    all_keywords = _json.dumps([
-        "цены на продукты", "цены в казахстане", "продукты дорожают",
-        "тенге", "цены на молоко", "цены на хлеб", "мясо подорожало",
-        "магнум", "магнумго", "цены в магнуме", "magnumgo",
-        "арбуз", "айрбафреш", "фридом кэшбэк", "каспи магнум",
-        "цены в айрбафреш", "цены в арбузе", "дорогие продукты",
-        "где покупать дешевые продукты", "продукты", "фрукты",
-        "яйца хлеб", "молоко", "дорожает", "дешевле"
+    optimized_keywords = _json.dumps([
+        "продукты", "овощи фрукты", "магазин цены", "дорогие продукты", "дорожает"
     ], ensure_ascii=False)
-    c.execute("UPDATE autopilot_settings SET keywords=? WHERE id=1", (all_keywords,))
+    c.execute("UPDATE autopilot_settings SET keywords=? WHERE id=1", (optimized_keywords,))
 
     # Посты на которые уже отвечали (чтобы не дублировать)
     c.execute("""
