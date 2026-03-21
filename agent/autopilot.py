@@ -220,7 +220,10 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     и пишет контекстные комментарии со ссылкой на сайт.
     """
     settings = get_autopilot_settings()
-    keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане", "продукты дорожают"])
+    keywords = settings.get("keywords", [
+        "цены на продукты", "цены в казахстане", "продукты дорожают",
+        "тенге", "цены на молоко", "цены на хлеб", "мясо подорожало"
+    ])
 
     if notify_fn:
         await notify_fn(f"🔍 Ищу трендовые посты через браузер:\n{', '.join(keywords)}")
@@ -285,7 +288,10 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
         return {"skipped": "автопилот выключен"}
 
     niche = settings.get("niche", "цены на продукты и товары в Казахстане")
-    keywords = settings.get("keywords", ["цены на продукты", "цены в казахстане"])
+    keywords = settings.get("keywords", [
+        "цены на продукты", "цены в казахстане", "продукты дорожают",
+        "тенге", "цены на молоко", "цены на хлеб", "мясо подорожало"
+    ])
     own_count = settings.get("own_posts_count", 5)
     reply_count = settings.get("reply_posts_count", 10)
 

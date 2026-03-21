@@ -9,6 +9,7 @@ Threads web scraper — ищет публичные посты через thread
 import json
 import logging
 import os
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
                         || link.closest('[data-pressable-container]')
                         || link.parentElement?.parentElement?.parentElement;
                     let text = '';
+                    let postDatetime = null;
                     if (container) {
                         const spans = container.querySelectorAll('span[dir="auto"]');
                         let best = '';
@@ -111,13 +113,17 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
                             if (t.length > best.length) best = t;
                         }
                         text = best;
+                        // Извлекаем дату из <time datetime="...">
+                        const timeEl = container.querySelector('time[datetime]');
+                        if (timeEl) postDatetime = timeEl.getAttribute('datetime');
                     }
                     if (username && shortcode && text && text.length > 20) {
                         results.push({
                             username,
                             shortcode,
                             post_url: link.href,
-                            text: text.slice(0, 500)
+                            text: text.slice(0, 500),
+                            datetime: postDatetime
                         });
                     }
                 }
@@ -126,6 +132,9 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
         """)
 
         results = []
+        now = datetime.now(timezone.utc)
+        max_age_hours = 48  # пропускаем посты старше 48 часов
+
         for p in post_data:
             sc = p.get("shortcode", "")
             username = p.get("username", "")
@@ -133,6 +142,19 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
             post_url = p.get("post_url", f"https://www.threads.net/@{username}/post/{sc}")
             if not sc or not username or not text:
                 continue
+
+            # Фильтр по дате — только свежие посты
+            dt_str = p.get("datetime")
+            if dt_str:
+                try:
+                    post_dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    age_hours = (now - post_dt).total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                        logger.debug(f"Пропускаем старый пост @{username} ({age_hours:.0f}ч)")
+                        continue
+                except Exception:
+                    pass  # нет даты — берём пост
+
             fake_id = f"sc:{sc}"
             if fake_id not in seen_ids:
                 results.append({
@@ -143,7 +165,7 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
                     "username": username,
                     "like_count": 0,
                     "replies_count": 0,
-                    "via_browser": True,  # нужен браузерный reply
+                    "via_browser": True,
                 })
                 seen_ids.add(fake_id)
                 if len(results) >= limit:
