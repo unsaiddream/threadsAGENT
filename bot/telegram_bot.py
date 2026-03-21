@@ -43,7 +43,12 @@ async def notify(text: str, group_only: bool = False):
 
     for chat_id in targets:
         try:
-            await _app.bot.send_message(chat_id=chat_id, text=text)
+            await _app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         except Exception as e:
             logger.error(f"Ошибка отправки в {chat_id}: {e}")
 

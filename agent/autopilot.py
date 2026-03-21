@@ -145,6 +145,28 @@ async def _do_reply(target: dict, reply_text: str) -> dict:
         return await reply_to_post(target["id"], reply_text)
 
 
+def _reply_notify_text(idx: int, total: int, target: dict, reply_text: str, result: dict) -> str:
+    """
+    Формирует HTML-уведомление об ответе.
+    🌐 — кликабельная ссылка на пост куда ответили.
+    """
+    import html as _html
+    username = target.get("username", "?")
+    target_url = target.get("post_url", "")
+    reply_permalink = result.get("permalink") or target_url
+
+    if reply_permalink:
+        mode_icon = f'<a href="{reply_permalink}">🌐</a>'
+    else:
+        mode_icon = "🌐" if target.get("via_browser") else "📡"
+
+    safe_text = _html.escape(reply_text)
+    return (
+        f"✅ {mode_icon} Ответ {idx}/{total} → @{username}:\n"
+        f"{safe_text}"
+    )
+
+
 async def _generate_reply(target_text: str) -> str:
     """Генерирует ответ на чужой пост — полезный + ссылка"""
 
@@ -271,12 +293,9 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
             if result.get("success"):
                 mark_replied(target["id"])
                 results["replies_published"] += 1
-                mode = "🌐" if target.get("via_browser") else "📡"
                 if notify_fn:
-                    await notify_fn(
-                        f"✅ {mode} Ответ {i+1}/{len(candidates)} → @{target.get('username','?')}:\n"
-                        f"{reply_text}"
-                    )
+                    msg = _reply_notify_text(i+1, len(candidates), target, reply_text, result)
+                    await notify_fn(msg)
             else:
                 err = result.get("error", "неизвестная ошибка")
                 results["errors"].append(f"Ответ {i+1}: {err}")
@@ -380,9 +399,9 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 if result.get("success"):
                     mark_replied(target["id"])
                     results["replies_published"] += 1
-                    mode = "🌐" if target.get("via_browser") else "📡"
                     if notify_fn:
-                        await notify_fn(f"✅ {mode} Ответ {i+1}/{reply_count} на @{target.get('username','?')}:\n{reply_text}")
+                        msg = _reply_notify_text(i+1, reply_count, target, reply_text, result)
+                        await notify_fn(msg)
                 else:
                     results["errors"].append(f"Ответ {i+1}: {result.get('error')}")
             except Exception as e:
