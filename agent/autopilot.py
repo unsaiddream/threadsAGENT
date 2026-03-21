@@ -275,7 +275,7 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
                 if notify_fn:
                     await notify_fn(
                         f"✅ {mode} Ответ {i+1}/{len(candidates)} → @{target.get('username','?')}:\n"
-                        f"{reply_text[:120]}..."
+                        f"{reply_text}"
                     )
             else:
                 err = result.get("error", "неизвестная ошибка")
@@ -382,7 +382,7 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                     results["replies_published"] += 1
                     mode = "🌐" if target.get("via_browser") else "📡"
                     if notify_fn:
-                        await notify_fn(f"✅ {mode} Ответ {i+1}/{reply_count} на @{target.get('username','?')}:\n{reply_text[:120]}...")
+                        await notify_fn(f"✅ {mode} Ответ {i+1}/{reply_count} на @{target.get('username','?')}:\n{reply_text}")
                 else:
                     results["errors"].append(f"Ответ {i+1}: {result.get('error')}")
             except Exception as e:
