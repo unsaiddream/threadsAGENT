@@ -89,8 +89,9 @@ def init_db():
     """)
     # Оптимизированные ключевые слова: 5 широких → быстрый поиск (~1 мин вместо 5+)
     import json as _json
+    # Ключевые слова: только про цены/стоимость, не общие темы
     optimized_keywords = _json.dumps([
-        "продукты", "овощи фрукты", "магазин цены", "дорогие продукты", "дорожает"
+        "цены в магазине", "подорожало", "дорого стало", "цены выросли", "где дешевле"
     ], ensure_ascii=False)
     c.execute("UPDATE autopilot_settings SET keywords=? WHERE id=1", (optimized_keywords,))
 
