@@ -152,7 +152,7 @@ async def autopilot_on_command(update: Update, context: ContextTypes.DEFAULT_TYP
     update_autopilot_settings(enabled=1)
     await update.message.reply_text(
         "Автопилот включён.\n"
-        "Каждый день в 10:00 буду публиковать 5 постов и 5 ответов в Threads.\n\n"
+        "4 раза в день (10:00, 12:00, 20:00, 22:00 Алматы) публикую 5 постов + 10 ответов.\n\n"
         "Запустить прямо сейчас: /run_autopilot"
     )
 

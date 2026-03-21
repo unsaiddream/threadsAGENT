@@ -87,6 +87,20 @@ def init_db():
     c.execute("""
         UPDATE autopilot_settings SET reply_posts_count=10 WHERE id=1 AND reply_posts_count=5
     """)
+    # Обновляем ключевые слова до расширенного списка
+    import json as _json
+    new_keywords = _json.dumps([
+        "цены на продукты", "цены в казахстане", "продукты дорожают",
+        "тенге", "цены на молоко", "цены на хлеб", "мясо подорожало"
+    ], ensure_ascii=False)
+    old_keywords = _json.dumps(
+        ["цены на продукты", "цены в казахстане", "продукты дорожают"],
+        ensure_ascii=False
+    )
+    c.execute(
+        "UPDATE autopilot_settings SET keywords=? WHERE id=1 AND keywords=?",
+        (new_keywords, old_keywords)
+    )
 
     # Посты на которые уже отвечали (чтобы не дублировать)
     c.execute("""
