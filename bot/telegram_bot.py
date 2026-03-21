@@ -28,14 +28,24 @@ def is_authorized(update: Update) -> bool:
     return update.effective_user.id == allowed_id
 
 
-async def notify(text: str):
-    """Отправить уведомление владельцу бота (используется автопилотом и планировщиком)"""
+GROUP_REPORT_ID = -5189891136  # Группа для отчётов автопилота
+
+
+async def notify(text: str, group_only: bool = False):
+    """Отправить уведомление владельцу и в группу отчётов"""
+    if not _app:
+        return
     user_id = get_allowed_user_id()
-    if _app and user_id:
+    targets = []
+    if not group_only and user_id:
+        targets.append(user_id)
+    targets.append(GROUP_REPORT_ID)
+
+    for chat_id in targets:
         try:
-            await _app.bot.send_message(chat_id=user_id, text=text)
+            await _app.bot.send_message(chat_id=chat_id, text=text)
         except Exception as e:
-            logger.error(f"Ошибка отправки уведомления: {e}")
+            logger.error(f"Ошибка отправки в {chat_id}: {e}")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

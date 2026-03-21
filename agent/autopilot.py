@@ -114,10 +114,11 @@ async def _generate_own_posts(price_context: str, niche: str, count: int) -> lis
         messages=[{"role": "user", "content": prompt}]
     )
 
-    # Считаем токены
+    # Считаем токены (Sonnet 4.6: $3/1M input, $15/1M output)
     usage = response.usage
     cost = (usage.input_tokens / 1_000_000 * 3) + (usage.output_tokens / 1_000_000 * 15)
     log_action("autopilot_tokens_own", f"in={usage.input_tokens} out={usage.output_tokens}", f"~${cost:.4f}")
+    _generate_own_posts.last_cost = getattr(_generate_own_posts, "last_cost", 0) + cost
 
     raw = response.content[0].text
     posts = [p.strip() for p in raw.split("---") if p.strip()]
@@ -170,6 +171,10 @@ async def _generate_reply(target_text: str) -> str:
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
+
+    usage = response.usage
+    reply_cost = (usage.input_tokens / 1_000_000 * 3) + (usage.output_tokens / 1_000_000 * 15)
+    _generate_reply.total_cost = getattr(_generate_reply, "total_cost", 0) + reply_cost
 
     text = response.content[0].text.strip()
     # Страховка — если ссылки нет, добавляем одну в конце
@@ -333,7 +338,9 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
             if result.get("success"):
                 results["own_published"] += 1
                 if notify_fn:
-                    await notify_fn(f"Пост {i+1}/{own_count}:\n{post[:150]}...")
+                    permalink = result.get("permalink") or ""
+                    link_line = f"\n🔗 {permalink}" if permalink else ""
+                    await notify_fn(f"📝 Пост {i+1}/{own_count}:\n{post[:200]}...{link_line}")
             else:
                 results["errors"].append(f"Пост {i+1}: {result.get('error')}")
         except Exception as e:
@@ -384,13 +391,23 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     update_autopilot_settings(last_run=datetime.now().isoformat())
     log_action("autopilot_done", None, str(results))
 
+    # Суммарные расходы на токены за этот запуск
+    total_cost = (
+        getattr(_generate_own_posts, "last_cost", 0) +
+        getattr(_generate_reply, "total_cost", 0)
+    )
+    # Сбрасываем счётчики для следующего запуска
+    _generate_own_posts.last_cost = 0
+    _generate_reply.total_cost = 0
+
     summary = (
-        f"Автопилот завершён!\n"
-        f"Постов: {results['own_published']}/{own_count}\n"
-        f"Ответов: {results['replies_published']}/{reply_count}"
+        f"✅ Автопилот завершён!\n"
+        f"📝 Постов: {results['own_published']}/{own_count}\n"
+        f"💬 Ответов: {results['replies_published']}/{reply_count}\n"
+        f"💰 Потрачено токенов: ~${total_cost:.4f}"
     )
     if results["errors"]:
-        summary += f"\nОшибок: {len(results['errors'])}"
+        summary += f"\n⚠️ Ошибок: {len(results['errors'])}"
     if notify_fn:
         await notify_fn(summary)
 

@@ -56,7 +56,24 @@ async def post_text(text: str) -> dict:
         media_id = pub_resp.json().get("id")
         save_threads_post(media_id, text)
         log_action("threads_post_published", text[:100], media_id)
-        return {"success": True, "media_id": media_id, "text": text}
+        permalink = await get_post_permalink(media_id)
+        return {"success": True, "media_id": media_id, "text": text, "permalink": permalink}
+
+
+async def get_post_permalink(media_id: str) -> str | None:
+    """Получить ссылку на пост по media_id"""
+    token = _get_token()
+    if not token or not media_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{THREADS_API_BASE}/{media_id}",
+                params={"fields": "permalink", "access_token": token}
+            )
+            return r.json().get("permalink")
+    except Exception:
+        return None
 
 
 async def post_with_image(text: str, image_url: str) -> dict:
