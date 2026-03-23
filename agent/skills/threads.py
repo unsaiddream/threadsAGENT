@@ -112,7 +112,8 @@ async def post_with_image(text: str, image_url: str) -> dict:
         media_id = pub_resp.json().get("id")
         save_threads_post(media_id, text, image_url, "IMAGE")
         log_action("threads_image_post_published", text[:100], media_id)
-        return {"success": True, "media_id": media_id}
+        permalink = await get_post_permalink(media_id)
+        return {"success": True, "media_id": media_id, "permalink": permalink}
 
 
 async def reply_to_post(post_id: str, text: str) -> dict:

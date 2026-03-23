@@ -11,7 +11,7 @@ import random
 import anthropic
 import os
 
-from agent.skills.threads import post_text, reply_to_post, get_my_posts, get_post_replies, get_my_username
+from agent.skills.threads import post_text, post_with_image, reply_to_post, get_my_posts, get_post_replies, get_my_username
 from agent.skills.threads_scraper import search_trending_posts, reply_via_browser
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
@@ -82,10 +82,10 @@ async def _fetch_deals_and_products() -> list[dict]:
     return items
 
 
-async def _generate_own_posts(price_context: str, niche: str, count: int) -> list[str]:
+async def _generate_own_posts(price_context: str, niche: str, count: int) -> list[dict]:
     """
     Генерирует N вирусных постов.
-    Каждый пост — под конкретный товар с uuid-ссылкой и реальными ценами.
+    Возвращает list[dict] с ключами: text, image_url (может быть None).
     """
 
     items = await _fetch_deals_and_products()
@@ -98,7 +98,6 @@ async def _generate_own_posts(price_context: str, niche: str, count: int) -> lis
         item = items[i]
         deal_info = format_product_for_prompt(item)
 
-        # Определяем тип контента по данным
         has_drop = bool(item.get("best_drop"))
         has_spread = item.get("spread_pct", 0) > 15
 
@@ -142,11 +141,16 @@ async def _generate_own_posts(price_context: str, niche: str, count: int) -> lis
 
             text = response.content[0].text.strip()
 
-            # Страховка: добавляем ссылку если нет
             if item["link"] not in text and SITE_LINK not in text:
                 text = text.rstrip() + f"\n\n{item['link']}"
 
-            posts.append(text)
+            # Картинка товара — посты с картинкой получают на 60% больше охвата
+            image = item.get("image_url") or None
+            # Чистим url картинки от placeholder параметров
+            if image and "%w" in image:
+                image = image.replace("%w", "400").replace("%h", "400")
+
+            posts.append({"text": text, "image_url": image})
         except Exception as e:
             logger.error(f"Ошибка генерации поста {i+1}: {e}")
 
@@ -463,15 +467,25 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
         results["errors"].append(f"Генерация: {e}")
         own_posts = []
 
-    for i, post in enumerate(own_posts):
+    for i, post_data in enumerate(own_posts):
         try:
-            result = await post_text(post)
+            text = post_data["text"]
+            image_url = post_data.get("image_url")
+
+            # Публикуем с картинкой если есть, иначе текстовый
+            if image_url:
+                result = await post_with_image(text, image_url)
+                post_type = "🖼"
+            else:
+                result = await post_text(text)
+                post_type = "📝"
+
             if result.get("success"):
                 results["own_published"] += 1
                 if notify_fn:
                     permalink = result.get("permalink") or ""
                     link_line = f"\n🔗 {permalink}" if permalink else ""
-                    await notify_fn(f"📝 Пост {i+1}/{own_count}:\n{post[:200]}...{link_line}")
+                    await notify_fn(f"{post_type} Пост {i+1}/{own_count}:\n{text[:200]}...{link_line}")
             else:
                 err = result.get("error", "неизвестная ошибка")
                 results["errors"].append(f"Пост {i+1}: {err}")
