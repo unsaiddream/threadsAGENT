@@ -25,7 +25,7 @@ async def post_text(text: str) -> dict:
     if not token or not user_id:
         return {"error": "THREADS_ACCESS_TOKEN и THREADS_USER_ID не настроены в .env"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         # Шаг 1: создать медиа-контейнер
         resp = await client.post(
             f"{THREADS_API_BASE}/{user_id}/threads",
@@ -84,7 +84,7 @@ async def post_with_image(text: str, image_url: str) -> dict:
     if not token or not user_id:
         return {"error": "THREADS_ACCESS_TOKEN и THREADS_USER_ID не настроены в .env"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{THREADS_API_BASE}/{user_id}/threads",
             params={
@@ -124,7 +124,7 @@ async def reply_to_post(post_id: str, text: str) -> dict:
     if not token or not user_id:
         return {"error": "Не настроены токены Threads"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{THREADS_API_BASE}/{user_id}/threads",
             params={
@@ -162,7 +162,7 @@ async def get_my_posts(limit: int = 10) -> dict:
     if not token or not user_id:
         return {"error": "Не настроены токены Threads"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{THREADS_API_BASE}/{user_id}/threads",
             params={
@@ -187,7 +187,7 @@ async def get_post_replies(media_id: str, limit: int = 10) -> dict:
     if not token:
         return {"error": "Не настроен THREADS_ACCESS_TOKEN"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{THREADS_API_BASE}/{media_id}/replies",
             params={
@@ -219,7 +219,7 @@ async def get_my_username() -> str | None:
     if not token or not user_id:
         return None
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{THREADS_API_BASE}/{user_id}",
             params={"fields": "username", "access_token": token}
@@ -236,7 +236,7 @@ async def get_insights(media_id: str) -> dict:
     if not token:
         return {"error": "Не настроен THREADS_ACCESS_TOKEN"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{THREADS_API_BASE}/{media_id}/insights",
             params={

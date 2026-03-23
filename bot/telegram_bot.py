@@ -28,49 +28,57 @@ def is_authorized(update: Update) -> bool:
     return update.effective_user.id == allowed_id
 
 
-CHANNEL_ID = -1003864267239  # Канал для отчётов автопилота
+CHANNEL_ID = -1003864267239  # Группа/канал для отчётов автопилота
 
-# Thread IDs для топиков в канале (Telegram Forum/Topics)
-# После первого запуска — бот создаст топики и запишет их ID
-TOPIC_POSTS = None      # Топик "📝 Посты"
-TOPIC_REPLIES = None    # Топик "💬 Ответы"
-TOPIC_SUMMARY = None    # Топик "📊 Отчёты"
-TOPIC_ERRORS = None     # Топик "⚠️ Ошибки"
+# Топики для канала (создаются один раз, ID хранятся в БД)
+TOPIC_DEFS = {
+    "posts":   "📝 Посты",
+    "replies": "💬 Ответы",
+    "summary": "📊 Отчёты",
+    "errors":  "⚠️ Ошибки",
+}
+
+_topics_cache: dict[str, int] = {}  # name → thread_id
+_topics_loaded = False
 
 
 async def _ensure_topics():
-    """Создаёт топики в канале если их ещё нет"""
-    global TOPIC_POSTS, TOPIC_REPLIES, TOPIC_SUMMARY, TOPIC_ERRORS
-    if TOPIC_POSTS is not None:
-        return  # уже инициализированы
+    """Загружает или создаёт топики в канале. ID хранятся в SQLite."""
+    global _topics_cache, _topics_loaded
+    if _topics_loaded:
+        return
+    _topics_loaded = True
 
     if not _app:
         return
 
-    topic_defs = [
-        ("TOPIC_POSTS", "📝 Посты"),
-        ("TOPIC_REPLIES", "💬 Ответы"),
-        ("TOPIC_SUMMARY", "📊 Отчёты"),
-        ("TOPIC_ERRORS", "⚠️ Ошибки"),
-    ]
+    from database.db import get_all_topics, save_topic_id
 
-    for var_name, name in topic_defs:
+    # 1. Загружаем из БД
+    _topics_cache = get_all_topics()
+    logger.info(f"Топики из БД: {_topics_cache}")
+
+    # 2. Создаём недостающие
+    for key, name in TOPIC_DEFS.items():
+        if key in _topics_cache:
+            continue
         try:
             result = await _app.bot.create_forum_topic(
                 chat_id=CHANNEL_ID,
                 name=name,
             )
-            globals()[var_name] = result.message_thread_id
-            logger.info(f"Создан топик '{name}' → thread_id={result.message_thread_id}")
+            tid = result.message_thread_id
+            _topics_cache[key] = tid
+            save_topic_id(key, tid)
+            logger.info(f"Создан топик '{name}' → thread_id={tid}")
         except Exception as e:
-            # Если топик уже существует или нет прав — не критично
             logger.warning(f"Не удалось создать топик '{name}': {e}")
 
 
 async def notify(text: str, group_only: bool = False, topic: str = None):
     """
-    Отправить уведомление владельцу и в канал.
-    topic: "posts" | "replies" | "summary" | "errors" — в какой топик канала
+    Отправить уведомление владельцу + в канал с топиком.
+    topic: "posts" | "replies" | "summary" | "errors"
     """
     if not _app:
         return
@@ -79,18 +87,7 @@ async def notify(text: str, group_only: bool = False, topic: str = None):
 
     user_id = get_allowed_user_id()
 
-    # Определяем thread_id для канала
-    thread_id = None
-    if topic == "posts":
-        thread_id = TOPIC_POSTS
-    elif topic == "replies":
-        thread_id = TOPIC_REPLIES
-    elif topic == "summary":
-        thread_id = TOPIC_SUMMARY
-    elif topic == "errors":
-        thread_id = TOPIC_ERRORS
-
-    # Отправляем владельцу в личку (без топиков)
+    # 1. Личка владельцу
     if not group_only and user_id:
         try:
             await _app.bot.send_message(
@@ -100,9 +97,10 @@ async def notify(text: str, group_only: bool = False, topic: str = None):
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            logger.error(f"Ошибка отправки в личку {user_id}: {e}")
+            logger.error(f"Ошибка личка {user_id}: {e}")
 
-    # Отправляем в канал (с топиком если есть)
+    # 2. Канал с топиком
+    thread_id = _topics_cache.get(topic) if topic else None
     try:
         kwargs = {
             "chat_id": CHANNEL_ID,
@@ -114,7 +112,18 @@ async def notify(text: str, group_only: bool = False, topic: str = None):
             kwargs["message_thread_id"] = thread_id
         await _app.bot.send_message(**kwargs)
     except Exception as e:
-        logger.error(f"Ошибка отправки в канал {CHANNEL_ID}: {e}")
+        logger.error(f"Ошибка канал {CHANNEL_ID} (topic={topic}, tid={thread_id}): {e}")
+        # Fallback: без топика
+        if thread_id:
+            try:
+                await _app.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

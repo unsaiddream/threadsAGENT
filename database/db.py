@@ -103,6 +103,14 @@ def init_db():
         )
     """)
 
+    # Хранение thread_id топиков канала
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS channel_topics (
+            name TEXT PRIMARY KEY,
+            thread_id INTEGER NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -215,3 +223,29 @@ def mark_replied(post_id: str):
     conn.execute("INSERT OR IGNORE INTO replied_posts (post_id) VALUES (?)", (post_id,))
     conn.commit()
     conn.close()
+
+
+# ── Топики канала ─────────────────────────────────────────
+
+def get_topic_id(name: str) -> int | None:
+    conn = get_conn()
+    row = conn.execute("SELECT thread_id FROM channel_topics WHERE name=?", (name,)).fetchone()
+    conn.close()
+    return row["thread_id"] if row else None
+
+
+def save_topic_id(name: str, thread_id: int):
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO channel_topics (name, thread_id) VALUES (?, ?)",
+        (name, thread_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_topics() -> dict:
+    conn = get_conn()
+    rows = conn.execute("SELECT name, thread_id FROM channel_topics").fetchall()
+    conn.close()
+    return {r["name"]: r["thread_id"] for r in rows}
