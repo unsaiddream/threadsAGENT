@@ -15,7 +15,8 @@ from agent.skills.threads import post_text, reply_to_post, get_my_posts, get_pos
 from agent.skills.threads_scraper import search_trending_posts, reply_via_browser
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
-    format_price_data_for_prompt, format_best_deals_for_prompt, SITE_LINK
+    format_price_data_for_prompt, format_best_deals_for_prompt,
+    SITE_LINK, product_link
 )
 from database.db import (
     get_autopilot_settings, update_autopilot_settings,
@@ -167,33 +168,105 @@ def _reply_notify_text(idx: int, total: int, target: dict, reply_text: str, resu
     )
 
 
+# Слова-маркеры: пост ОБЯЗАН содержать хотя бы одно чтобы считаться релевантным
+RELEVANCE_KEYWORDS = [
+    "цен", "цена", "цены", "дорог", "дешев", "подорожа", "стоит", "стоимост",
+    "магазин", "магнум", "small", "арзан", "анвар", "galmart",
+    "переплат", "экономи", "скидк", "акци", "бюджет",
+    "продукт", "молок", "хлеб", "яйц", "масл", "мясо", "куриц",
+    "овощ", "фрукт", "банан", "помидор", "картош", "сахар",
+    "гречк", "рис ", "корзин", "чек ", "тенге", "₸",
+]
+
+
+def _is_post_relevant(text: str) -> bool:
+    """Быстрая проверка релевантности поста БЕЗ вызова AI"""
+    text_lower = text.lower()
+    matches = sum(1 for kw in RELEVANCE_KEYWORDS if kw in text_lower)
+    return matches >= 2  # минимум 2 совпадения
+
+
+def _extract_product_keywords(text: str) -> list[str]:
+    """Извлекает названия продуктов из текста поста для поиска на minprice.kz"""
+    product_map = {
+        "молок": "молоко", "хлеб": "хлеб", "яйц": "яйца", "масл": "масло",
+        "мясо": "мясо", "куриц": "курица", "говядин": "говядина",
+        "банан": "бананы", "помидор": "помидоры", "огурц": "огурцы",
+        "картош": "картофель", "сахар": "сахар", "гречк": "гречка",
+        "рис ": "рис", "лук ": "лук", "морков": "морковь",
+        "овощ": "овощи", "фрукт": "фрукты", "творог": "творог",
+        "сметан": "сметана", "кефир": "кефир", "сыр ": "сыр",
+        "колбас": "колбаса", "макарон": "макароны", "мук": "мука",
+    }
+    text_lower = text.lower()
+    found = []
+    for marker, product in product_map.items():
+        if marker in text_lower and product not in found:
+            found.append(product)
+    return found[:3]  # максимум 3 продукта
+
+
+async def _fetch_prices_for_reply(product_keywords: list[str]) -> str:
+    """Загружает реальные цены для конкретных продуктов из поста"""
+    if not product_keywords:
+        return ""
+
+    lines = []
+    for product in product_keywords:
+        try:
+            results = await search_prices(product, limit=2)
+            for r in results:
+                stores = r.get("stores", [])[:3]
+                store_info = ", ".join(f"{s['store']}: {s['price']:.0f}₸" for s in stores)
+                link = product_link(product)
+                lines.append(f"{r['title']}: {store_info} → {link}")
+        except Exception as e:
+            logger.warning(f"Цены для reply ({product}): {e}")
+
+    return "\n".join(lines)
+
+
 async def _generate_reply(target_text: str) -> str | None:
     """
-    Генерирует ответ на чужой пост.
+    Генерирует умный контекстный ответ на чужой пост.
 
-    Антиспам-логика:
-    - Ссылка включается только в ~30% случаев, когда пост ПРЯМО про цены/магазины
-    - В остальных случаях — живое вовлечение: вопрос, мнение, факт
-    - Если пост нерелевантен — возвращает None (пропускаем)
+    1. Код проверяет релевантность (без AI)
+    2. Извлекает продукты из текста
+    3. Загружает реальные цены с minprice.kz
+    4. Claude пишет ответ с конкретными фактами и ссылкой на продукт
     """
+
+    # Шаг 1: Проверяем релевантность без AI
+    if not _is_post_relevant(target_text):
+        logger.info(f"SKIP (код): нет ключевых слов в посте")
+        return None
+
+    # Шаг 2: Какие продукты упоминаются?
+    products = _extract_product_keywords(target_text)
+
+    # Шаг 3: Грузим реальные цены для этих продуктов
+    price_context = await _fetch_prices_for_reply(products)
+
+    # Формируем ссылку: конкретный продукт если есть, иначе общая
+    if products:
+        link = product_link(products[0])
+    else:
+        link = SITE_LINK
 
     prompt = f"""Чужой пост в Threads:
 "{target_text}"
 
-Ты ведёшь аккаунт @minimalprice_kz — про сравнение цен на продукты в казахстанских магазинах.
+Ты ведёшь аккаунт @minimalprice_kz — сервис сравнения цен на продукты по магазинам Казахстана.
 
-Шаг 1: Определи тему поста.
-Пост про цены в магазинах / где дешевле купить / подорожание конкретных товаров / экономию на продуктах?
-→ Если ДА: напиши полезный ответ (см. ниже)
-→ Если НЕТ (личное, эмоции, рецепты, путешествия, другое): верни только слово SKIP
+{"РЕАЛЬНЫЕ ЦЕНЫ ПРЯМО СЕЙЧАС:" + chr(10) + price_context + chr(10) if price_context else ""}
+Напиши ответ к этому посту:
+- Используй КОНКРЕТНЫЕ цифры из данных выше если они есть
+- Ссылка на продукт: {link}
+- 1-2 предложения максимум, разговорный тон
+- Звучи как обычный человек который делится находкой, НЕ как бот
+- НЕ начинай с "Кстати", "Интересно", "О,"
 
-Шаг 2 (только если пост про цены): напиши ответ.
-- 1-2 предложения, разговорный стиль
-- Иногда со ссылкой {SITE_LINK}, иногда без — зависит от уместности
-- Не начинай с "Кстати"
-- Звучи как человек, не как реклама
-
-ВАЖНО: верни ТОЛЬКО текст ответа или слово SKIP. Никаких объяснений, никаких рассуждений.
+Верни ТОЛЬКО текст ответа. Без объяснений.
 """
 
     response = _claude().messages.create(
@@ -208,8 +281,12 @@ async def _generate_reply(target_text: str) -> str | None:
 
     text = response.content[0].text.strip()
 
-    # Если Claude решил что пост нерелевантен — пропускаем
-    if text.upper() == "SKIP" or text.upper().startswith("SKIP"):
+    # Защита от вывода рассуждений
+    if text.upper().startswith("SKIP"):
+        return None
+    if "---" in text:
+        text = text.split("---")[-1].strip()
+    if not text:
         return None
 
     return text
@@ -225,10 +302,12 @@ async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dic
     # 1. Ищем чужие посты через браузер
     scraped = await search_trending_posts(keywords, limit=count * 2)
 
-    # Фильтруем: только чужие и ещё не отвеченные
+    # Фильтруем: только чужие, не отвеченные, и РЕЛЕВАНТНЫЕ (про цены/продукты)
     candidates = [
         p for p in scraped
-        if not is_already_replied(p["id"]) and p.get("username") != my_username
+        if not is_already_replied(p["id"])
+        and p.get("username") != my_username
+        and _is_post_relevant(p.get("text", ""))
     ]
 
     if candidates:

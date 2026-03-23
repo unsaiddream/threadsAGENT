@@ -9,6 +9,13 @@ logger = logging.getLogger(__name__)
 
 BASE = "https://backend.minprice.kz/api"
 SITE_LINK = "https://minprice.kz/?th"
+SEARCH_LINK = "https://minprice.kz/search?q={query}&th"
+
+
+def product_link(product_name: str) -> str:
+    """Прямая ссылка на конкретный продукт на minprice.kz"""
+    from urllib.parse import quote
+    return SEARCH_LINK.format(query=quote(product_name))
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 
