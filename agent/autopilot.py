@@ -377,35 +377,32 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     ])
 
     if notify_fn:
-        await notify_fn(f"🔍 Ищу трендовые посты через браузер:\n{', '.join(keywords)}")
+        await notify_fn(f"🔍 Ищу трендовые посты:\n{', '.join(keywords)}", topic="replies")
 
     candidates = await _collect_reply_candidates(keywords, count)
 
     if not candidates:
         if notify_fn:
-            await notify_fn("Не найдено постов для ответов.")
+            await notify_fn("Не найдено постов для ответов.", topic="replies")
         return {"replies_published": 0, "errors": []}
 
     if notify_fn:
         sample_info = "\n".join(
             [f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in candidates[:3]]
         )
-        await notify_fn(f"Найдено {len(candidates)} постов. Начинаю отвечать:\n{sample_info}")
+        await notify_fn(f"Найдено {len(candidates)} постов:\n{sample_info}", topic="replies")
 
     results = {"replies_published": 0, "errors": []}
 
     replied_count = 0
     for i, target in enumerate(candidates):
         try:
-            # Генерируем ответ с учётом контекста родительского поста
             context = target.get("_parent_post_text", "")
             combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
             reply_text = await _generate_reply(combined_text)
 
-            # SKIP — Claude посчитал пост нерелевантным
             if reply_text is None:
-                mark_replied(target["id"])  # помечаем чтобы не трогать снова
-                logger.info(f"SKIP: нерелевантный пост @{target.get('username')}")
+                mark_replied(target["id"])
                 continue
 
             result = await _do_reply(target, reply_text)
@@ -416,14 +413,16 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
                 replied_count += 1
                 if notify_fn:
                     msg = _reply_notify_text(replied_count, len(candidates), target, reply_text, result)
-                    await notify_fn(msg)
+                    await notify_fn(msg, topic="replies")
             else:
-                err = result.get("error", "неизвестная ошибка")
+                err = result.get("error", "?")
                 results["errors"].append(f"Ответ {i+1}: {err}")
                 if notify_fn:
-                    await notify_fn(f"❌ Ответ {i+1} не удался: {err}")
+                    await notify_fn(f"❌ Ответ {i+1}:\n{err[:500]}", topic="errors")
         except Exception as e:
-            results["errors"].append(f"Ответ {i+1}: {e}")
+            results["errors"].append(f"Ответ {i+1}: {repr(e)}")
+            if notify_fn:
+                await notify_fn(f"❌ Ответ {i+1}:\n{repr(e)}", topic="errors")
 
         if i < len(candidates) - 1:
             delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
@@ -433,7 +432,8 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
         await notify_fn(
             f"Ответы завершены!\n"
             f"Опубликовано: {results['replies_published']}/{len(candidates)}\n"
-            + (f"Ошибок: {len(results['errors'])}" if results["errors"] else "")
+            + (f"Ошибок: {len(results['errors'])}" if results["errors"] else ""),
+            topic="summary"
         )
     return results
 
@@ -455,7 +455,10 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     results = {"own_published": 0, "replies_published": 0, "errors": []}
 
     if notify_fn:
-        await notify_fn(f"Автопилот запустился\nПлан: {own_count} постов + {reply_count} ответов\nЗагружаю цены с minprice.kz...")
+        await notify_fn(
+            f"Автопилот запустился\nПлан: {own_count} постов + {reply_count} ответов\nЗагружаю цены с minprice.kz...",
+            topic="summary"
+        )
 
     log_action("autopilot_start", f"own={own_count} replies={reply_count}")
 
@@ -466,71 +469,76 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
         logger.error(f"Ошибка генерации постов: {e}")
         results["errors"].append(f"Генерация: {e}")
         own_posts = []
+        if notify_fn:
+            await notify_fn(f"❌ Генерация постов: {repr(e)}", topic="errors")
 
     for i, post_data in enumerate(own_posts):
         try:
             text = post_data["text"]
             image_url = post_data.get("image_url")
 
-            # Публикуем с картинкой если есть, иначе текстовый
+            # Публикуем с картинкой, fallback на текст
+            result = None
+            post_type = "📝"
             if image_url:
                 result = await post_with_image(text, image_url)
                 post_type = "🖼"
+                # Если картинка не прошла — пробуем текстом
+                if not result.get("success"):
+                    logger.warning(f"Image post failed, fallback to text: {result.get('error')}")
+                    result = await post_text(text)
+                    post_type = "📝"
             else:
                 result = await post_text(text)
-                post_type = "📝"
 
             if result.get("success"):
                 results["own_published"] += 1
                 if notify_fn:
                     permalink = result.get("permalink") or ""
                     link_line = f"\n🔗 {permalink}" if permalink else ""
-                    await notify_fn(f"{post_type} Пост {i+1}/{own_count}:\n{text[:200]}...{link_line}")
+                    await notify_fn(
+                        f"{post_type} Пост {i+1}/{own_count}:\n{text[:200]}...{link_line}",
+                        topic="posts"
+                    )
             else:
                 err = result.get("error", "неизвестная ошибка")
                 results["errors"].append(f"Пост {i+1}: {err}")
                 if notify_fn:
-                    await notify_fn(f"❌ Пост {i+1} не удался:\n{err}")
+                    await notify_fn(f"❌ Пост {i+1}:\n{err[:500]}", topic="errors")
         except Exception as e:
-            results["errors"].append(f"Пост {i+1}: {e}")
+            results["errors"].append(f"Пост {i+1}: {repr(e)}")
             if notify_fn:
-                await notify_fn(f"❌ Пост {i+1} exception:\n{e}")
+                await notify_fn(f"❌ Пост {i+1} exception:\n{repr(e)}", topic="errors")
 
         if i < len(own_posts) - 1:
             delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
-            if notify_fn:
-                await notify_fn(f"Пауза {delay//60} мин перед следующим постом...")
             await asyncio.sleep(delay)
 
     # ── 2. Ищем трендовые посты и пишем контекстные ответы ─
     if notify_fn:
-        await notify_fn(f"🔍 Ищу трендовые посты:\n{', '.join(keywords)}")
+        await notify_fn(f"🔍 Ищу трендовые посты:\n{', '.join(keywords)}", topic="replies")
 
     to_reply = await _collect_reply_candidates(keywords, reply_count)
 
     if not to_reply:
         if notify_fn:
-            await notify_fn("Не найдено постов для ответов.")
+            await notify_fn("Не найдено постов для ответов.", topic="replies")
     else:
         if notify_fn:
             sample = "\n".join([f"• @{p.get('username','?')}: {p.get('text','')[:50]}..." for p in to_reply[:3]])
-            await notify_fn(f"Найдено {len(to_reply)} постов. Примеры:\n{sample}")
+            await notify_fn(f"Найдено {len(to_reply)} постов:\n{sample}", topic="replies")
         replied_count = 0
         for i, target in enumerate(to_reply):
             try:
                 delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
-                if notify_fn:
-                    await notify_fn(f"Пауза {delay//60} мин перед ответом {i+1}...")
                 await asyncio.sleep(delay)
 
                 context = target.get("_parent_post_text", "")
                 combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
                 reply_text = await _generate_reply(combined_text)
 
-                # SKIP — Claude посчитал пост нерелевантным
                 if reply_text is None:
                     mark_replied(target["id"])
-                    logger.info(f"SKIP: нерелевантный пост @{target.get('username')}")
                     continue
 
                 result = await _do_reply(target, reply_text)
@@ -541,21 +549,24 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                     replied_count += 1
                     if notify_fn:
                         msg = _reply_notify_text(replied_count, reply_count, target, reply_text, result)
-                        await notify_fn(msg)
+                        await notify_fn(msg, topic="replies")
                 else:
-                    results["errors"].append(f"Ответ {i+1}: {result.get('error')}")
+                    err = result.get("error", "?")
+                    results["errors"].append(f"Ответ {i+1}: {err}")
+                    if notify_fn:
+                        await notify_fn(f"❌ Ответ {i+1}:\n{err[:500]}", topic="errors")
             except Exception as e:
-                results["errors"].append(f"Ответ {i+1}: {e}")
+                results["errors"].append(f"Ответ {i+1}: {repr(e)}")
+                if notify_fn:
+                    await notify_fn(f"❌ Ответ {i+1}:\n{repr(e)}", topic="errors")
 
     update_autopilot_settings(last_run=datetime.now().isoformat())
     log_action("autopilot_done", None, str(results))
 
-    # Суммарные расходы на токены за этот запуск
     total_cost = (
         getattr(_generate_own_posts, "last_cost", 0) +
         getattr(_generate_reply, "total_cost", 0)
     )
-    # Сбрасываем счётчики для следующего запуска
     _generate_own_posts.last_cost = 0
     _generate_reply.total_cost = 0
 
@@ -568,6 +579,6 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
     if results["errors"]:
         summary += f"\n⚠️ Ошибок: {len(results['errors'])}"
     if notify_fn:
-        await notify_fn(summary)
+        await notify_fn(summary, topic="summary")
 
     return results

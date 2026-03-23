@@ -28,29 +28,93 @@ def is_authorized(update: Update) -> bool:
     return update.effective_user.id == allowed_id
 
 
-GROUP_REPORT_ID = -5189891136  # Группа для отчётов автопилота
+CHANNEL_ID = -1003864267239  # Канал для отчётов автопилота
+
+# Thread IDs для топиков в канале (Telegram Forum/Topics)
+# После первого запуска — бот создаст топики и запишет их ID
+TOPIC_POSTS = None      # Топик "📝 Посты"
+TOPIC_REPLIES = None    # Топик "💬 Ответы"
+TOPIC_SUMMARY = None    # Топик "📊 Отчёты"
+TOPIC_ERRORS = None     # Топик "⚠️ Ошибки"
 
 
-async def notify(text: str, group_only: bool = False):
-    """Отправить уведомление владельцу и в группу отчётов"""
+async def _ensure_topics():
+    """Создаёт топики в канале если их ещё нет"""
+    global TOPIC_POSTS, TOPIC_REPLIES, TOPIC_SUMMARY, TOPIC_ERRORS
+    if TOPIC_POSTS is not None:
+        return  # уже инициализированы
+
     if not _app:
         return
-    user_id = get_allowed_user_id()
-    targets = []
-    if not group_only and user_id:
-        targets.append(user_id)
-    targets.append(GROUP_REPORT_ID)
 
-    for chat_id in targets:
+    topic_defs = [
+        ("TOPIC_POSTS", "📝 Посты"),
+        ("TOPIC_REPLIES", "💬 Ответы"),
+        ("TOPIC_SUMMARY", "📊 Отчёты"),
+        ("TOPIC_ERRORS", "⚠️ Ошибки"),
+    ]
+
+    for var_name, name in topic_defs:
+        try:
+            result = await _app.bot.create_forum_topic(
+                chat_id=CHANNEL_ID,
+                name=name,
+            )
+            globals()[var_name] = result.message_thread_id
+            logger.info(f"Создан топик '{name}' → thread_id={result.message_thread_id}")
+        except Exception as e:
+            # Если топик уже существует или нет прав — не критично
+            logger.warning(f"Не удалось создать топик '{name}': {e}")
+
+
+async def notify(text: str, group_only: bool = False, topic: str = None):
+    """
+    Отправить уведомление владельцу и в канал.
+    topic: "posts" | "replies" | "summary" | "errors" — в какой топик канала
+    """
+    if not _app:
+        return
+
+    await _ensure_topics()
+
+    user_id = get_allowed_user_id()
+
+    # Определяем thread_id для канала
+    thread_id = None
+    if topic == "posts":
+        thread_id = TOPIC_POSTS
+    elif topic == "replies":
+        thread_id = TOPIC_REPLIES
+    elif topic == "summary":
+        thread_id = TOPIC_SUMMARY
+    elif topic == "errors":
+        thread_id = TOPIC_ERRORS
+
+    # Отправляем владельцу в личку (без топиков)
+    if not group_only and user_id:
         try:
             await _app.bot.send_message(
-                chat_id=chat_id,
+                chat_id=user_id,
                 text=text,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            logger.error(f"Ошибка отправки в {chat_id}: {e}")
+            logger.error(f"Ошибка отправки в личку {user_id}: {e}")
+
+    # Отправляем в канал (с топиком если есть)
+    try:
+        kwargs = {
+            "chat_id": CHANNEL_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if thread_id:
+            kwargs["message_thread_id"] = thread_id
+        await _app.bot.send_message(**kwargs)
+    except Exception as e:
+        logger.error(f"Ошибка отправки в канал {CHANNEL_ID}: {e}")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
