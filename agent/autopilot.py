@@ -41,97 +41,122 @@ def _claude():
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
-async def _fetch_price_context() -> str:
+async def _fetch_deals_and_products() -> list[dict]:
     """
-    Получает актуальные цены для контента:
-    1. Best deals с minprice.kz (товары с максимальной выгодой)
-    2. Случайные продукты из ежедневного списка
+    Получает товары для постов: best deals + случайные продукты.
+    Возвращает список dict с title, stores, link (конкретная ссылка на товар).
     """
-    parts = []
+    items = []
 
-    # 1. Best deals — лучший материал для вирусных постов
+    # 1. Best deals — товары с максимальной выгодой
     try:
-        deals = await get_best_deals(limit=8, min_score=0.10)
-        if deals:
-            parts.append(format_best_deals_for_prompt(deals))
+        deals = await get_best_deals(limit=10, min_score=0.10)
+        for d in deals:
+            items.append({
+                "title": d["title"],
+                "brand": d.get("brand", ""),
+                "min_price": d["min_price"],
+                "max_price": d["max_price"],
+                "discount_pct": d.get("discount_pct", 0),
+                "stores": d.get("stores", [])[:4],
+                "link": product_link(d["title"]),
+            })
     except Exception as e:
         logger.warning(f"Не смог получить best deals: {e}")
 
     # 2. Случайные продукты для разнообразия
-    products_to_check = random.sample(DAILY_PRODUCTS, min(4, len(DAILY_PRODUCTS)))
-    all_data = []
-    for product in products_to_check:
+    products_to_check = random.sample(DAILY_PRODUCTS, min(5, len(DAILY_PRODUCTS)))
+    for product_name in products_to_check:
         try:
-            results = await search_prices(product, limit=3)
-            all_data.extend(results)
+            results = await search_prices(product_name, limit=2)
+            for r in results:
+                items.append({
+                    "title": r["title"],
+                    "brand": "",
+                    "min_price": r.get("min_price", 0),
+                    "max_price": r.get("max_price", 0),
+                    "discount_pct": 0,
+                    "stores": r.get("stores", [])[:4],
+                    "link": product_link(r["title"]),
+                })
         except Exception as e:
-            logger.warning(f"Не смог получить цены на {product}: {e}")
+            logger.warning(f"Цены на {product_name}: {e}")
 
-    if all_data:
-        parts.append(format_price_data_for_prompt(all_data))
+    # Перемешиваем чтобы каждый запуск давал разные товары
+    random.shuffle(items)
+    return items
 
-    return "\n\n".join(parts) if parts else ""
+
+def _format_deal_for_prompt(item: dict) -> str:
+    """Форматирует один товар для промпта"""
+    stores_str = ", ".join(
+        f"{s['store']}: {s['price']:.0f}₸" for s in item.get("stores", [])[:4]
+    )
+    brand = f" ({item['brand']})" if item.get("brand") else ""
+    discount = f", выгода ~{item['discount_pct']:.0f}%" if item.get("discount_pct") else ""
+    return f"{item['title']}{brand}: {stores_str}{discount}\nСсылка: {item['link']}"
 
 
 async def _generate_own_posts(price_context: str, niche: str, count: int) -> list[str]:
-    """Генерирует N вирусных постов на основе реальных цен"""
+    """
+    Генерирует N вирусных постов.
+    Каждый пост — под конкретный товар с конкретной ссылкой.
+    price_context тут не используется — данные грузятся через _fetch_deals_and_products().
+    """
 
-    prompt = f"""Ты — автор @minimalprice_kz в Threads. Сайт: {SITE_LINK}
+    # Загружаем товары
+    items = await _fetch_deals_and_products()
+    if not items:
+        logger.error("Нет данных о ценах для постов")
+        return []
 
-РЕАЛЬНЫЕ цены прямо сейчас:
-{price_context}
+    posts = []
+    for i in range(min(count, len(items))):
+        item = items[i]
+        deal_info = _format_deal_for_prompt(item)
 
-Напиши {count} РАЗНЫХ вирусных постов. Каждый пост — отдельная идея, разный продукт.
+        prompt = f"""Ты — @minimalprice_kz в Threads. Пишешь про цены на продукты в Казахстане.
 
-━━ АЛГОРИТМ THREADS: что даёт охват ━━
-• Первая строка = крючок. Стоп-скролл. Без неё пост мёртв.
-• Эмоция важнее информации: возмущение, удивление, узнавание себя
-• Конкретные цифры и названия магазинов → люди сохраняют и пересылают
-• Вопрос в конце → провоцирует ответы (ответы = охват х2)
-• 100–200 символов в основном тексте, потом ссылка
+ТОВАР ДЛЯ ПОСТА:
+{deal_info}
 
-━━ ФОРМАТЫ (чередуй) ━━
-1. ШОК-ФАКТ: "[Продукт] в [Магазин А] — 999₸. В [Магазин Б] — 650₸. Это 35% переплаты за тот же товар. Проверяй: {SITE_LINK}"
-2. ПРОВОКАЦИЯ: "Магазины знают что ты не сравниваешь цены. Поэтому [факт]. Вот где реально дешевле: {SITE_LINK}"
-3. ЛАЙФХАК: "Сэкономил [X]₸ за месяц одним правилом: [правило]. Работает для [продукт]. {SITE_LINK}"
-4. СРАВНЕНИЕ: "[Продукт]: мин. [X]₸ / макс. [Y]₸. Разница [Z]₸ — это [аналогия]. Где дешевле → {SITE_LINK}"
-5. ВОПРОС-БОЛЬ: "Вы вообще знаете сколько [продукт] стоит в [магазин]? Я не знал пока не проверил. [Факт]. {SITE_LINK}"
-6. СОЦИАЛЬНОЕ ДОКАЗАТЕЛЬСТВО: "[X] человек уже сравнили цены на [продукт] сегодня. Самый дешёвый вариант: {SITE_LINK}"
+Напиши один короткий вирусный пост для Threads (100-200 символов + ссылка).
 
-━━ ТЕГИ (добавь в конец каждого поста) ━━
-Выбери 3–4 из: #цены #Казахстан #экономия #продукты #Алматы #инфляция #лайфхак #тенге
+Правила:
+- Первая строка = крючок: шок, вопрос, или провокация
+- Используй КОНКРЕТНЫЕ цифры и названия магазинов из данных выше
+- Ссылка на ЭТОТ товар: {item['link']} — вставь в конце, ОДИН раз
+- Вопрос в конце чтобы люди отвечали
+- Добавь 3-4 хештега из: #цены #Казахстан #экономия #продукты #Алматы #инфляция #лайфхак #тенге
+- Разговорный стиль, как обычный пост человека
+- НЕ используй слово "сервис", "платформа", "ресурс"
 
-━━ ОБЯЗАТЕЛЬНО ━━
-- Ссылка {SITE_LINK} только ОДИН РАЗ, в конце
-- Конкретные цифры из данных выше
-- Разговорный стиль, без официоза
-
-Верни ТОЛЬКО {count} постов, каждый отделён строкой "---"
+Верни ТОЛЬКО текст поста. Без объяснений.
 """
 
-    response = _claude().messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}]
-    )
+        try:
+            response = _claude().messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}]
+            )
 
-    # Считаем токены (Sonnet 4.6: $3/1M input, $15/1M output)
-    usage = response.usage
-    cost = (usage.input_tokens / 1_000_000 * 3) + (usage.output_tokens / 1_000_000 * 15)
-    log_action("autopilot_tokens_own", f"in={usage.input_tokens} out={usage.output_tokens}", f"~${cost:.4f}")
-    _generate_own_posts.last_cost = getattr(_generate_own_posts, "last_cost", 0) + cost
+            usage = response.usage
+            cost = (usage.input_tokens / 1_000_000 * 3) + (usage.output_tokens / 1_000_000 * 15)
+            _generate_own_posts.last_cost = getattr(_generate_own_posts, "last_cost", 0) + cost
 
-    raw = response.content[0].text
-    posts = [p.strip() for p in raw.split("---") if p.strip()]
+            text = response.content[0].text.strip()
 
-    # Убеждаемся что ссылка есть в каждом посте
-    final = []
-    for p in posts[:count]:
-        if SITE_LINK not in p:
-            p = p.rstrip() + f"\n\nВсе цены: {SITE_LINK}"
-        final.append(p)
+            # Страховка: если ссылки нет — добавляем конкретную
+            if item["link"] not in text and SITE_LINK not in text:
+                text = text.rstrip() + f"\n\n{item['link']}"
 
-    return final
+            posts.append(text)
+        except Exception as e:
+            logger.error(f"Ошибка генерации поста {i+1}: {e}")
+
+    log_action("autopilot_tokens_own", f"posts={len(posts)}", f"~${getattr(_generate_own_posts, 'last_cost', 0):.4f}")
+    return posts
 
 
 async def _do_reply(target: dict, reply_text: str) -> dict:
@@ -436,14 +461,9 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
 
     log_action("autopilot_start", f"own={own_count} replies={reply_count}")
 
-    # ── Получаем реальные цены ─────────────────────────────
-    price_context = await _fetch_price_context()
-    if notify_fn and price_context:
-        await notify_fn(f"Данные о ценах получены. Генерирую посты...")
-
-    # ── 1. Свои посты ─────────────────────────────────────
+    # ── 1. Свои посты (внутри загружаются deals + prices) ──
     try:
-        own_posts = await _generate_own_posts(price_context, niche, own_count)
+        own_posts = await _generate_own_posts("", niche, own_count)
     except Exception as e:
         logger.error(f"Ошибка генерации постов: {e}")
         results["errors"].append(f"Генерация: {e}")
