@@ -16,7 +16,7 @@ from agent.skills.threads_scraper import search_trending_posts, reply_via_browse
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     get_multi_store_products, get_price_drops,
-    format_product_for_prompt, product_link, product_search_link,
+    format_product_for_prompt, product_link,
     SITE_LINK
 )
 from database.db import (

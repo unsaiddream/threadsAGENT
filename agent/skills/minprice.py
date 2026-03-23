@@ -19,15 +19,13 @@ SITE_LINK = "https://minprice.kz/?th"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 
-def product_link(uuid: str) -> str:
-    """Прямая ссылка на товар по UUID"""
-    return f"https://minprice.kz/product/{uuid}"
-
-
-def product_search_link(query: str) -> str:
-    """Ссылка на поиск (fallback если нет uuid)"""
+def product_link(title: str) -> str:
+    """Ссылка на minprice.kz с названием товара для поиска"""
     from urllib.parse import quote
-    return f"https://minprice.kz/?search={quote(query)}"
+    # Берём первые 2-3 слова из названия для чистого поиска
+    words = title.split()[:3]
+    short_query = " ".join(words)
+    return f"https://minprice.kz/?th&q={quote(short_query)}"
 
 
 def _parse_store(store: dict) -> dict:
@@ -85,7 +83,7 @@ def _parse_product(item: dict) -> dict:
         "stores": stores,
         "stores_count": len(stores),
         "best_drop": best_drop,
-        "link": product_link(uuid) if uuid else SITE_LINK,
+        "link": product_link(item.get("title", "")) if item.get("title") else SITE_LINK,
     }
 
 
