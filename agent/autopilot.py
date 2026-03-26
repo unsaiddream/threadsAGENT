@@ -365,6 +365,101 @@ async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dic
     return fallback[:count]
 
 
+async def run_test_post(notify_fn=None) -> dict:
+    """
+    Тестовый режим: генерирует и публикует ОДИН пост.
+    Удобно проверять новые фичи без запуска полного автопилота.
+    """
+    if notify_fn:
+        await notify_fn("🧪 Тест: генерирую один пост...", topic="posts")
+
+    items = await _fetch_deals_and_products()
+    if not items:
+        msg = "❌ Нет данных о ценах для поста"
+        if notify_fn:
+            await notify_fn(msg, topic="errors")
+        return {"success": False, "error": msg}
+
+    item = items[0]
+    deal_info = format_product_for_prompt(item)
+
+    has_drop = bool(item.get("best_drop"))
+    has_spread = item.get("spread_pct", 0) > 15
+    if has_drop:
+        angle = "ЦЕНА УПАЛА — покажи было/стало и где именно"
+    elif has_spread:
+        angle = "РАЗНИЦА ЦЕН между магазинами — покажи где дешевле, а где переплата"
+    else:
+        angle = "ФАКТ ПРО ЦЕНУ — удиви конкретной цифрой"
+
+    prompt = f"""Ты — @minimalprice_kz в Threads. Пишешь про цены на продукты в Казахстане.
+
+ТОВАР:
+{deal_info}
+
+УГОЛ ПОСТА: {angle}
+
+Напиши один короткий вирусный пост (100-200 символов + ссылка).
+
+Правила:
+- Первая строка = крючок: шок-факт, вопрос, или провокация
+- КОНКРЕТНЫЕ цифры и названия магазинов из данных
+- Ссылка: {item['link']} — один раз, в конце
+- Вопрос в конце → люди отвечают → охват растёт
+- 3-4 хештега: #цены #Казахстан #экономия #продукты #Алматы #инфляция #лайфхак #тенге
+- Пиши как человек, не как маркетолог
+
+Верни ТОЛЬКО текст поста.
+"""
+
+    try:
+        response = _claude().messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = response.content[0].text.strip()
+        if item["link"] not in text and SITE_LINK not in text:
+            text = text.rstrip() + f"\n\n{item['link']}"
+
+        image = item.get("image_url") or None
+        if image and "%w" in image:
+            image = image.replace("%w", "400").replace("%h", "400")
+
+        # Публикуем
+        result = None
+        post_type = "📝"
+        if image:
+            result = await post_with_image(text, image)
+            post_type = "🖼"
+            if not result.get("success"):
+                logger.warning(f"Image failed, fallback to text: {result.get('error')}")
+                result = await post_text(text)
+                post_type = "📝"
+        else:
+            result = await post_text(text)
+
+        if result.get("success"):
+            permalink = result.get("permalink") or ""
+            link_line = f"\n🔗 {permalink}" if permalink else ""
+            if notify_fn:
+                await notify_fn(
+                    f"{post_type} Тестовый пост опубликован:\n{text[:300]}{link_line}",
+                    topic="posts"
+                )
+            return {"success": True, "text": text, "permalink": permalink}
+        else:
+            err = result.get("error", "неизвестная ошибка")
+            if notify_fn:
+                await notify_fn(f"❌ Тест не прошёл:\n{err[:500]}", topic="errors")
+            return {"success": False, "error": err}
+
+    except Exception as e:
+        if notify_fn:
+            await notify_fn(f"❌ Ошибка тестового поста:\n{repr(e)}", topic="errors")
+        return {"success": False, "error": repr(e)}
+
+
 async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     """
     Ищет трендовые посты по ключевым словам через Playwright scraper

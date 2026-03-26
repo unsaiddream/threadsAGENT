@@ -155,6 +155,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команды:\n"
         "/start — приветствие\n"
         "/help — эта справка\n"
+        "/test_post — опубликовать один тестовый пост\n"
         "/posts — последние 10 постов из Threads\n"
         "/autopilot — статус и управление автопилотом\n"
         "/autopilot_on — включить автопилот\n"
@@ -272,6 +273,19 @@ async def run_autopilot_command(update: Update, context: ContextTypes.DEFAULT_TY
     asyncio.create_task(run_autopilot(notify_fn=notify, force=True))
 
 
+async def test_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Опубликовать один тестовый пост (для проверки новых фич)"""
+    if not is_authorized(update):
+        return
+
+    await update.message.reply_text("🧪 Генерирую один тестовый пост...")
+
+    from agent.autopilot import run_test_post
+    import asyncio
+
+    asyncio.create_task(run_test_post(notify_fn=notify))
+
+
 async def run_replies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запустить только ответы на чужие посты"""
     if not is_authorized(update):
@@ -357,6 +371,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _setup_bot_commands(app: Application):
     """Регистрирует команды в меню Telegram (вызывается при старте)."""
     commands = [
+        BotCommand("test_post",     "Опубликовать один тестовый пост"),
         BotCommand("run_autopilot", "Запустить автопилот (посты + ответы)"),
         BotCommand("run_replies",   "Только ответы на трендовые посты"),
         BotCommand("autopilot_on",  "Включить автопилот по расписанию"),
@@ -392,6 +407,7 @@ def create_bot() -> Application:
     _app.add_handler(CommandHandler("autopilot", autopilot_status_command))
     _app.add_handler(CommandHandler("autopilot_on", autopilot_on_command))
     _app.add_handler(CommandHandler("autopilot_off", autopilot_off_command))
+    _app.add_handler(CommandHandler("test_post", test_post_command))
     _app.add_handler(CommandHandler("run_autopilot", run_autopilot_command))
     _app.add_handler(CommandHandler("run_replies", run_replies_command))
     _app.add_handler(CommandHandler("check_search", check_search_command))
