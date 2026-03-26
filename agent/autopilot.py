@@ -431,26 +431,16 @@ async def run_test_post(notify_fn=None) -> dict:
         if image and "%w" in image:
             image = image.replace("%w", "400").replace("%h", "400")
 
-        # Публикуем
-        logger.info(f"run_test_post: публикую {'с картинкой' if image else 'текст'}...")
-        result = None
-        post_type = "📝"
-        if image:
-            result = await post_with_image(text, image)
-            post_type = "🖼"
-            if not result.get("success"):
-                logger.warning(f"Image failed, fallback to text: {result.get('error')}")
-                result = await post_text(text)
-                post_type = "📝"
-        else:
-            result = await post_text(text)
+        # Постим как текст — Threads сам покажет превью ссылки из поста
+        logger.info("run_test_post: публикую...")
+        result = await post_text(text)
 
         if result.get("success"):
             permalink = result.get("permalink") or ""
             link_line = f"\n🔗 {permalink}" if permalink else ""
             if notify_fn:
                 await notify_fn(
-                    f"{post_type} Тестовый пост опубликован:\n{text[:300]}{link_line}",
+                    f"📝 Тестовый пост опубликован:\n{text[:300]}{link_line}",
                     topic="posts"
                 )
             return {"success": True, "text": text, "permalink": permalink}
@@ -578,19 +568,8 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
             text = post_data["text"]
             image_url = post_data.get("image_url")
 
-            # Публикуем с картинкой, fallback на текст
-            result = None
-            post_type = "📝"
-            if image_url:
-                result = await post_with_image(text, image_url)
-                post_type = "🖼"
-                # Если картинка не прошла — пробуем текстом
-                if not result.get("success"):
-                    logger.warning(f"Image post failed, fallback to text: {result.get('error')}")
-                    result = await post_text(text)
-                    post_type = "📝"
-            else:
-                result = await post_text(text)
+            # Постим как текст — Threads сам покажет превью ссылки из поста
+            result = await post_text(text)
 
             if result.get("success"):
                 results["own_published"] += 1
@@ -598,7 +577,7 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                     permalink = result.get("permalink") or ""
                     link_line = f"\n🔗 {permalink}" if permalink else ""
                     await notify_fn(
-                        f"{post_type} Пост {i+1}/{own_count}:\n{text[:200]}...{link_line}",
+                        f"📝 Пост {i+1}/{own_count}:\n{text[:200]}...{link_line}",
                         topic="posts"
                     )
             else:
