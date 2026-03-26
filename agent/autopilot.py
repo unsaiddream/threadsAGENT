@@ -370,10 +370,13 @@ async def run_test_post(notify_fn=None) -> dict:
     Тестовый режим: генерирует и публикует ОДИН пост.
     Удобно проверять новые фичи без запуска полного автопилота.
     """
+    logger.info("run_test_post: старт")
     if notify_fn:
         await notify_fn("🧪 Тест: генерирую один пост...", topic="posts")
 
+    logger.info("run_test_post: загружаю товары с minprice...")
     items = await _fetch_deals_and_products()
+    logger.info(f"run_test_post: получено {len(items)} товаров")
     if not items:
         msg = "❌ Нет данных о ценах для поста"
         if notify_fn:
@@ -413,11 +416,13 @@ async def run_test_post(notify_fn=None) -> dict:
 """
 
     try:
+        logger.info("run_test_post: вызываю Claude API...")
         response = _claude().messages.create(
             model="claude-sonnet-4-6",
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}]
         )
+        logger.info("run_test_post: Claude ответил")
         text = response.content[0].text.strip()
         if item["link"] not in text and SITE_LINK not in text:
             text = text.rstrip() + f"\n\n{item['link']}"
@@ -427,6 +432,7 @@ async def run_test_post(notify_fn=None) -> dict:
             image = image.replace("%w", "400").replace("%h", "400")
 
         # Публикуем
+        logger.info(f"run_test_post: публикую {'с картинкой' if image else 'текст'}...")
         result = None
         post_type = "📝"
         if image:
