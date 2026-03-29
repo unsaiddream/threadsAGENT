@@ -192,22 +192,58 @@ def _reply_notify_text(idx: int, total: int, target: dict, reply_text: str, resu
     )
 
 
-# Слова-маркеры: пост ОБЯЗАН содержать хотя бы одно чтобы считаться релевантным
-RELEVANCE_KEYWORDS = [
-    "цен", "цена", "цены", "дорог", "дешев", "подорожа", "стоит", "стоимост",
-    "магазин", "магнум", "small", "арзан", "анвар", "galmart",
-    "переплат", "экономи", "скидк", "акци", "бюджет",
+# Уровень 3 (score=3): пост ИДЕАЛЬНО подходит — человек спрашивает про цены / просит сравнение
+_TIER3_PATTERNS = [
+    "сравните цен", "сравни цен", "сравнивал цен", "кто нибудь сравнивал",
+    "что с ценами", "а что с ценами", "почему цены", "куда цены",
+    "дорожают продукты", "продукты дорожают", "всё дорожает",
+    "где дешевле купить", "где дешевле продукты", "посоветуйте где",
+    "помогите найти дешевле", "как сэкономить на продукт",
+    "цены на продукты", "цены выросли", "подорожало всё", "подорожали продукты",
+    "почему так дорого", "почему всё так дорого",
+]
+
+# Уровень 2 (score=2): упоминает цены, экономию, магазины — хорошо для ответа
+_TIER2_KEYWORDS = [
+    "цен", "дорог", "дешев", "подорожа", "переплат", "экономи",
+    "скидк", "акци", "чек ", "тенге", "₸", "бюджет",
+    "магнум", "small", "арзан", "анвар", "galmart", "метро", "магазин",
+]
+
+# Уровень 1 (score=1): только продукты без цен — слабый контекст
+_TIER1_FOOD = [
     "продукт", "молок", "хлеб", "яйц", "масл", "мясо", "куриц",
     "овощ", "фрукт", "банан", "помидор", "картош", "сахар",
-    "гречк", "рис ", "корзин", "чек ", "тенге", "₸",
+    "гречк", "рис ", "корзин", "покупк",
 ]
 
 
+def _score_post_relevance(text: str) -> int:
+    """
+    Оценивает релевантность поста по 4-уровневой шкале:
+    3 = идеально (вопрос про цены / запрос сравнения)
+    2 = хорошо (упоминает цены, экономию, магазины)
+    1 = слабо (только продукты, без цен)
+    0 = нерелевантно — пропускаем
+    """
+    t = text.lower()
+    for pattern in _TIER3_PATTERNS:
+        if pattern in t:
+            return 3
+    price_hits = sum(1 for kw in _TIER2_KEYWORDS if kw in t)
+    food_hits = sum(1 for kw in _TIER1_FOOD if kw in t)
+    if price_hits >= 2:
+        return 2
+    if price_hits >= 1 and food_hits >= 1:
+        return 2  # цена + продукт = хороший контекст для ответа
+    if price_hits >= 1 or food_hits >= 2:
+        return 1
+    return 0
+
+
 def _is_post_relevant(text: str) -> bool:
-    """Быстрая проверка релевантности поста БЕЗ вызова AI"""
-    text_lower = text.lower()
-    matches = sum(1 for kw in RELEVANCE_KEYWORDS if kw in text_lower)
-    return matches >= 2  # минимум 2 совпадения
+    """Совместимость: возвращает True если score >= 1"""
+    return _score_post_relevance(text) >= 1
 
 
 def _extract_product_keywords(text: str) -> list[str]:
@@ -255,42 +291,45 @@ async def _fetch_prices_for_reply(product_keywords: list[str]) -> tuple[str, str
     return "\n".join(lines), best_link
 
 
-async def _generate_reply(target_text: str) -> str | None:
+async def _generate_reply(target_text: str, score: int = 1) -> str | None:
     """
     Генерирует умный контекстный ответ на чужой пост.
-
-    1. Код проверяет релевантность (без AI)
-    2. Извлекает продукты из текста
-    3. Загружает реальные цены с minprice.kz
-    4. Claude пишет ответ с конкретными фактами и ссылкой на продукт
+    score — уровень релевантности (3=вопрос про цены, 2=упоминает цены, 1=продукты).
+    Определяет интент поста и строит ответ точно под него.
     """
-
-    # Шаг 1: Проверяем релевантность без AI
-    if not _is_post_relevant(target_text):
-        logger.info(f"SKIP (код): нет ключевых слов в посте")
-        return None
-
-    # Шаг 2: Какие продукты упоминаются?
     products = _extract_product_keywords(target_text)
-
-    # Шаг 3: Грузим реальные цены и получаем uuid-ссылку
     price_context, link = await _fetch_prices_for_reply(products)
+
+    t = target_text.lower()
+
+    # Определяем интент для точного ответа
+    if any(p in t for p in ["сравни", "сравните", "сравнивал", "где дешевле", "кто нибудь", "посоветуй", "помогите"]):
+        intent = "Человек ПРОСИТ СРАВНЕНИЕ или помощь найти дешевле — дай прямой ответ: назови конкретный магазин и цену из данных, скажи что у тебя есть сравнение, дай ссылку"
+    elif any(p in t for p in ["дорожают", "дорожает", "дорого", "подорожал", "выросли", "растут цены", "всё дорожает"]):
+        intent = "Человек ЖАЛУЕТСЯ на рост цен — посочувствуй одним словом и сразу предложи конкретное решение: где сейчас дешевле с ценами из данных"
+    elif any(p in t for p in ["что с ценами", "а что с ценами", "почему цены", "куда цены"]):
+        intent = "Человек задаёт ВОПРОС про цены — ответь как знающий: дай конкретику с цифрами из данных, объясни где разница"
+    else:
+        intent = "Человек упоминает цены или продукты — добавь ПОЛЕЗНЫЙ ФАКТ: конкретная цена из данных которая удивит, и ссылка"
+
+    price_block = f"АКТУАЛЬНЫЕ ЦЕНЫ ПРЯМО СЕЙЧАС:\n{price_context}\n\n" if price_context else ""
 
     prompt = f"""Чужой пост в Threads:
 "{target_text}"
 
-Ты ведёшь аккаунт @minimalprice_kz — сервис сравнения цен на продукты по магазинам Казахстана.
+Ты — @minimalprice_kz, сервис сравнения цен на продукты в Казахстане.
 
-{"РЕАЛЬНЫЕ ЦЕНЫ ПРЯМО СЕЙЧАС:" + chr(10) + price_context + chr(10) if price_context else ""}
-Напиши ответ к этому посту:
-- Используй КОНКРЕТНЫЕ цифры из данных выше если они есть
-- Ссылка на продукт: {link}
-- 1-2 предложения максимум, разговорный тон
-- Звучи как обычный человек который делится находкой, НЕ как бот
-- НЕ начинай с "Кстати", "Интересно", "О,"
+{price_block}ЗАДАЧА: {intent}
 
-Верни ТОЛЬКО текст ответа. Без объяснений.
-"""
+Правила ответа:
+- Отвечай ПРЯМО на то что человек написал — никакого общего комментария
+- {"Используй КОНКРЕТНЫЕ цифры: магазин + цена из данных выше" if price_context else "Упомяни что можно сравнить цены по всем магазинам"}
+- Ссылка: {link} — добавь в конце естественно, не как рекламу
+- 1-2 предложения, живой разговорный тон
+- Звучи как человек который реально знает цены, НЕ как бот
+- НЕ начинай с: "Кстати", "Интересно", "О,", "Привет", "Да,"
+
+Верни ТОЛЬКО текст ответа. Без объяснений."""
 
     response = _claude().messages.create(
         model="claude-sonnet-4-6",
@@ -304,7 +343,6 @@ async def _generate_reply(target_text: str) -> str | None:
 
     text = response.content[0].text.strip()
 
-    # Защита от вывода рассуждений
     if text.upper().startswith("SKIP"):
         return None
     if "---" in text:
@@ -318,24 +356,37 @@ async def _generate_reply(target_text: str) -> str | None:
 async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dict]:
     """
     Ищет трендовые посты по ключевым словам через Playwright scraper.
+    Ранжирует кандидатов по релевантности (score 3→2→1).
     Fallback: комментарии под своими постами если scraper не нашёл ничего.
     """
     my_username = await get_my_username()
 
-    # 1. Ищем чужие посты через браузер
-    scraped = await search_trending_posts(keywords, limit=count * 2)
+    # 1. Ищем чужие посты через браузер — берём с запасом чтобы было из чего выбирать
+    scraped = await search_trending_posts(keywords, limit=count * 3)
 
-    # Фильтруем: только чужие, не отвеченные, и РЕЛЕВАНТНЫЕ (про цены/продукты)
-    candidates = [
-        p for p in scraped
-        if not is_already_replied(p["id"])
-        and p.get("username") != my_username
-        and _is_post_relevant(p.get("text", ""))
-    ]
+    # Скорим и фильтруем
+    scored = []
+    for p in scraped:
+        if is_already_replied(p["id"]):
+            continue
+        if p.get("username") == my_username:
+            continue
+        s = _score_post_relevance(p.get("text", ""))
+        if s > 0:
+            p["_relevance_score"] = s
+            scored.append(p)
 
-    if candidates:
-        logger.info(f"Scraper нашёл {len(candidates)} постов для ответов")
-        return candidates[:count]
+    # Сортируем: сначала score=3, потом 2, потом 1
+    scored.sort(key=lambda p: p["_relevance_score"], reverse=True)
+
+    # Логируем распределение для диагностики
+    dist = {3: 0, 2: 0, 1: 0}
+    for p in scored:
+        dist[p["_relevance_score"]] += 1
+    logger.info(f"Scraper нашёл {len(scored)} постов: tier3={dist[3]}, tier2={dist[2]}, tier1={dist[1]}")
+
+    if scored:
+        return scored[:count]
 
     # 2. Fallback: отвечаем на комментарии под своими постами
     logger.info("Scraper не нашёл постов — используем комментарии под своими постами")
@@ -357,6 +408,7 @@ async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dic
                         and r.get("text")
                         and r.get("username") != my_username):
                     r["_parent_post_text"] = post.get("text", "")
+                    r["_relevance_score"] = _score_post_relevance(r.get("text", "")) or 2
                     fallback.append(r)
                     seen_ids.add(rid)
         except Exception as e:
@@ -463,8 +515,11 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     """
     settings = get_autopilot_settings()
     keywords = settings.get("keywords", [
-        "цены на продукты", "цены в казахстане", "продукты дорожают",
-        "продукты", "овощи фрукты", "магазин цены", "дорогие продукты", "дорожает"
+        "цены на продукты",
+        "а что с ценами",
+        "дорожают продукты",
+        "кто нибудь сравнивал цены",
+        "сравните цены",
     ])
 
     if notify_fn:
@@ -490,7 +545,8 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
         try:
             context = target.get("_parent_post_text", "")
             combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
-            reply_text = await _generate_reply(combined_text)
+            score = target.get("_relevance_score", 1)
+            reply_text = await _generate_reply(combined_text, score=score)
 
             if reply_text is None:
                 mark_replied(target["id"])
@@ -537,8 +593,11 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
 
     niche = settings.get("niche", "цены на продукты и товары в Казахстане")
     keywords = settings.get("keywords", [
-        "цены на продукты", "цены в казахстане", "продукты дорожают",
-        "продукты", "овощи фрукты", "магазин цены", "дорогие продукты", "дорожает"
+        "цены на продукты",
+        "а что с ценами",
+        "дорожают продукты",
+        "кто нибудь сравнивал цены",
+        "сравните цены",
     ])
     own_count = settings.get("own_posts_count", 5)
     reply_count = settings.get("reply_posts_count", 10)
@@ -615,7 +674,8 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
 
                 context = target.get("_parent_post_text", "")
                 combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
-                reply_text = await _generate_reply(combined_text)
+                score = target.get("_relevance_score", 1)
+                reply_text = await _generate_reply(combined_text, score=score)
 
                 if reply_text is None:
                     mark_replied(target["id"])
