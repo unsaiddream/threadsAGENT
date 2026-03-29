@@ -152,24 +152,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Команды:\n"
-        "/start — приветствие\n"
-        "/help — эта справка\n"
-        "/test_post — опубликовать один тестовый пост\n"
-        "/posts — последние 10 постов из Threads\n"
-        "/autopilot — статус и управление автопилотом\n"
-        "/autopilot_on — включить автопилот\n"
-        "/autopilot_off — выключить автопилот\n"
-        "/run_autopilot — запустить автопилот сейчас (посты + ответы)\n"
+        "Команды:\n\n"
+        "⚡ Реальное время:\n"
+        "/monitor_on — мониторинг каждые 3 мин (или /monitor_on 5 для 5 мин)\n"
+        "/monitor_off — остановить мониторинг\n"
+        "/monitor — статус\n\n"
+        "🤖 Автопилот:\n"
+        "/run_autopilot — посты + ответы прямо сейчас\n"
         "/run_replies — только ответы на чужие посты\n"
-        "/check_search — проверить работу поиска Threads\n"
-        "/clear — очистить историю диалога\n\n"
-        "Примеры запросов:\n"
-        "• «Напиши вирусный пост про цены на продукты»\n"
-        "• «Опубликуй в Threads: [текст]»\n"
-        "• «Запланируй пост на 2025-01-15 09:00: [текст]»\n"
-        "• «Сделай контент-план на неделю»\n"
-        "• «Покажи статистику поста [ID]»"
+        "/autopilot_on — включить по расписанию\n"
+        "/autopilot_off — выключить\n"
+        "/autopilot — настройки\n\n"
+        "📝 Прочее:\n"
+        "/test_post — один тестовый пост\n"
+        "/check_search — диагностика поиска\n"
+        "/clear — очистить историю\n"
+        "/help — эта справка"
     )
 
 
@@ -302,6 +300,68 @@ async def run_replies_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     asyncio.create_task(run_replies_only(notify_fn=notify, count=10))
 
 
+async def monitor_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статус монитора реального времени"""
+    if not is_authorized(update):
+        return
+
+    from agent.autopilot import is_monitor_active
+    active = is_monitor_active()
+    status = "🟢 работает" if active else "🔴 остановлен"
+    await update.message.reply_text(
+        f"Монитор реального времени: {status}\n\n"
+        "Мониторинг ищет СВЕЖИЕ посты каждые 3 минуты\n"
+        "и сразу отвечает — пока другие ещё не успели.\n\n"
+        "/monitor_on — включить\n"
+        "/monitor_off — выключить"
+    )
+
+
+async def monitor_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Включить мониторинг в реальном времени"""
+    if not is_authorized(update):
+        return
+
+    from agent.autopilot import is_monitor_active, run_monitor_loop
+    import asyncio
+
+    if is_monitor_active():
+        await update.message.reply_text("Монитор уже работает. /monitor_off чтобы остановить.")
+        return
+
+    # Интервал из аргумента: /monitor_on 5 → каждые 5 минут
+    interval = 3
+    if context.args:
+        try:
+            interval = max(1, min(30, int(context.args[0])))
+        except ValueError:
+            pass
+
+    await update.message.reply_text(
+        f"⚡ Монитор запускается...\n"
+        f"Буду искать свежие посты каждые {interval} мин\n"
+        f"и сразу отвечать на них.\n\n"
+        f"/monitor_off — остановить"
+    )
+
+    asyncio.create_task(run_monitor_loop(notify_fn=notify, interval_minutes=interval))
+
+
+async def monitor_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Остановить мониторинг"""
+    if not is_authorized(update):
+        return
+
+    from agent.autopilot import stop_monitor, is_monitor_active
+
+    if not is_monitor_active():
+        await update.message.reply_text("Монитор и так не работает.")
+        return
+
+    stop_monitor()
+    await update.message.reply_text("⏹ Монитор остановлен.")
+
+
 async def check_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Диагностика: показать комментарии под своими постами"""
     if not is_authorized(update):
@@ -371,13 +431,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _setup_bot_commands(app: Application):
     """Регистрирует команды в меню Telegram (вызывается при старте)."""
     commands = [
+        BotCommand("monitor_on",    "⚡ Мониторинг в реальном времени (каждые 3 мин)"),
+        BotCommand("monitor_off",   "⏹ Остановить мониторинг"),
+        BotCommand("monitor",       "Статус мониторинга"),
         BotCommand("test_post",     "Опубликовать один тестовый пост"),
         BotCommand("run_autopilot", "Запустить автопилот (посты + ответы)"),
         BotCommand("run_replies",   "Только ответы на трендовые посты"),
         BotCommand("autopilot_on",  "Включить автопилот по расписанию"),
         BotCommand("autopilot_off", "Выключить автопилот"),
         BotCommand("autopilot",     "Статус автопилота"),
-        BotCommand("posts",         "Опубликовать посты прямо сейчас"),
         BotCommand("check_search",  "Проверить поиск Threads"),
         BotCommand("clear",         "Очистить историю чата"),
         BotCommand("help",          "Список команд"),
@@ -410,6 +472,9 @@ def create_bot() -> Application:
     _app.add_handler(CommandHandler("test_post", test_post_command))
     _app.add_handler(CommandHandler("run_autopilot", run_autopilot_command))
     _app.add_handler(CommandHandler("run_replies", run_replies_command))
+    _app.add_handler(CommandHandler("monitor", monitor_status_command))
+    _app.add_handler(CommandHandler("monitor_on", monitor_on_command))
+    _app.add_handler(CommandHandler("monitor_off", monitor_off_command))
     _app.add_handler(CommandHandler("check_search", check_search_command))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

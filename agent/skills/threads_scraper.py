@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default"
+SEARCH_URL_TOP    = "https://www.threads.com/search?q={query}&serp_type=default"
+SEARCH_URL_RECENT = "https://www.threads.com/search?q={query}&serp_type=recent"
+SEARCH_URL = SEARCH_URL_TOP  # оставляем для совместимости
 
 
 def _get_auth_cookies() -> list[dict]:
@@ -40,6 +42,52 @@ def _get_auth_cookies() -> list[dict]:
             cookies.append({"name": name, "value": value, "domain": ".instagram.com", "path": "/"})
 
     return cookies
+
+
+async def _click_recent_tab(page) -> bool:
+    """
+    Кликает вкладку 'Недавние' на странице поиска Threads.
+    Нужна для мониторинга — находим самые свежие посты, не топ по лайкам.
+    Возвращает True если вкладка найдена и кликнута.
+    """
+    # Пробуем разные способы найти вкладку
+    for selector in [
+        '[role="tab"]:has-text("Недавние")',
+        '[role="tab"]:has-text("Recent")',
+        'div[role="tab"] >> text=Недавние',
+        'div[role="tab"] >> text=Recent',
+    ]:
+        try:
+            tab = page.locator(selector).first
+            if await tab.is_visible(timeout=3000):
+                await tab.click()
+                await page.wait_for_timeout(1500)
+                logger.info("Переключился на вкладку 'Недавние'")
+                return True
+        except Exception:
+            continue
+
+    # Fallback через JavaScript — ищем таб по тексту
+    clicked = await page.evaluate("""
+        () => {
+            const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+            for (const tab of tabs) {
+                const text = (tab.textContent || tab.innerText || '').trim();
+                if (text.includes('Недавние') || text.includes('Recent')) {
+                    tab.click();
+                    return text;
+                }
+            }
+            return null;
+        }
+    """)
+    if clicked:
+        await page.wait_for_timeout(1500)
+        logger.info(f"Вкладка 'Недавние' найдена через JS: '{clicked}'")
+        return True
+
+    logger.warning("Вкладка 'Недавние' не найдена — остаёмся на 'Топ'")
+    return False
 
 
 def _extract_posts_recursive(data, posts: list, seen_ids: set, max_posts: int):
@@ -81,10 +129,11 @@ def _extract_posts_recursive(data, posts: list, seen_ids: set, max_posts: int):
             _extract_posts_recursive(item, posts, seen_ids, max_posts)
 
 
-async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]:
+async def _extract_posts_from_dom(page, seen_ids: set, limit: int, max_age_hours: int = 48) -> list[dict]:
     """
     Fallback: парсит посты из DOM по shortcode.
     via_browser=True — ответ через браузерный click (нужна THREADS_SESSION_ID).
+    max_age_hours — пропускаем посты старше этого порога (2ч для мониторинга, 48ч для автопилота).
     """
     try:
         post_data = await page.evaluate(r"""
@@ -133,7 +182,6 @@ async def _extract_posts_from_dom(page, seen_ids: set, limit: int) -> list[dict]
 
         results = []
         now = datetime.now(timezone.utc)
-        max_age_hours = 48  # пропускаем посты старше 48 часов
 
         for p in post_data:
             sc = p.get("shortcode", "")
@@ -359,15 +407,17 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
         return {"error": f"Browser reply error: {e}"}
 
 
-async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[dict]:
+async def search_trending_posts(keywords: list[str], limit: int = 20, recent: bool = False) -> list[dict]:
     """
     Ищет публичные посты Threads по ключевым словам.
-    Возвращает список постов. via_browser=True → reply через браузер (нужен THREADS_SESSION_ID).
+    recent=True → вкладка "Недавние" (для мониторинга в реальном времени).
+    recent=False → вкладка "Топ" (для автопилота — берём популярные посты).
     """
     all_posts = []
     seen_ids = set()
-    per_keyword = max(limit // max(len(keywords), 1), 5)
+    per_keyword = max(limit, 20)
     cookies = _get_auth_cookies()
+    max_age_hours = 2 if recent else 48  # для мониторинга — только самые свежие
 
     try:
         from playwright.async_api import async_playwright
@@ -383,7 +433,6 @@ async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[di
                     "Chrome/120.0.0.0 Safari/537.36"
                 )
             )
-            # Если есть сессия — авторизуемся (больше постов + можно reply)
             if cookies:
                 await context.add_cookies(cookies)
                 logger.info("Scraper: авторизован в Threads (sessionid есть)")
@@ -392,7 +441,7 @@ async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[di
 
             page = await context.new_page()
 
-            # Перехватываем GraphQL — там реальные pk
+            # Перехватываем GraphQL — там реальные pk для API reply
             api_responses: list[dict] = []
 
             async def on_response(response):
@@ -403,7 +452,6 @@ async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[di
                     if "json" not in ctype:
                         return
                     body = await response.text()
-                    # Только JSON с данными постов Threads
                     if '"pk"' in body and '"text_post_app_text"' in body:
                         api_responses.append(json.loads(body))
                 except Exception:
@@ -412,42 +460,63 @@ async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[di
             page.on("response", on_response)
 
             for keyword in keywords:
-                if len(all_posts) >= limit:
-                    break
-
+                # Ищем ВСЕ ключевые слова — не прерываемся по достижению limit
+                # (limit применяется только в финальном срезе)
                 api_responses.clear()
                 logger.info(f"Scraping: '{keyword}'")
 
                 try:
-                    url = SEARCH_URL.format(query=keyword.replace(" ", "+"))
-                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    base_url = SEARCH_URL_RECENT if recent else SEARCH_URL_TOP
+                    url = base_url.format(query=keyword.replace(" ", "+"))
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     try:
-                        await page.wait_for_selector('a[href*="/post/"]', timeout=5000)
+                        await page.wait_for_selector('a[href*="/post/"]', timeout=10000)
                     except Exception:
                         pass
-                    await page.wait_for_timeout(1000)
-                    for _ in range(2):
+                    await page.wait_for_timeout(2000)
+
+                    # Для мониторинга: кликаем вкладку "Недавние" если ещё не на ней
+                    if recent:
+                        await _click_recent_tab(page)
+                        await page.wait_for_timeout(1000)
+
+                    # Умный скролл — продолжаем пока страница растёт
+                    scroll_count = 6 if recent else 10  # для мониторинга быстрее
+                    prev_height = 0
+                    stale_count = 0
+                    for scroll_i in range(scroll_count):
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(800)
+                        await page.wait_for_timeout(1800)
+                        await page.keyboard.press("End")
+                        await page.wait_for_timeout(600)
+                        new_height = await page.evaluate("document.body.scrollHeight")
+                        logger.debug(f"  scroll {scroll_i+1}: → {new_height}px")
+                        if new_height == prev_height:
+                            stale_count += 1
+                            if stale_count >= 2:
+                                break
+                        else:
+                            stale_count = 0
+                        prev_height = new_height
+
                 except Exception as e:
                     logger.warning(f"Ошибка загрузки '{keyword}': {e}")
                     continue
 
-                # 1. GraphQL — реальные pk, API reply
+                # 1. GraphQL — реальные pk, API reply (предпочтительно)
                 keyword_posts: list[dict] = []
                 for resp_data in api_responses:
                     _extract_posts_recursive(resp_data, keyword_posts, seen_ids, per_keyword)
-                    if len(keyword_posts) >= per_keyword:
-                        break
 
                 if keyword_posts:
-                    logger.info(f"'{keyword}': GraphQL → {len(keyword_posts)} постов (API reply)")
+                    logger.info(f"'{keyword}': GraphQL → {len(keyword_posts)} постов")
                 else:
-                    # 2. DOM fallback — браузерный reply
-                    keyword_posts = await _extract_posts_from_dom(page, seen_ids, per_keyword)
-                    logger.info(f"'{keyword}': DOM → {len(keyword_posts)} постов (browser reply)")
+                    # 2. DOM fallback — shortcode, браузерный reply
+                    keyword_posts = await _extract_posts_from_dom(page, seen_ids, per_keyword, max_age_hours=max_age_hours)
+                    logger.info(f"'{keyword}': DOM → {len(keyword_posts)} постов")
 
                 all_posts.extend(keyword_posts)
+                logger.info(f"Итого собрано (raw): {len(all_posts)} постов")
 
             await browser.close()
 
@@ -456,8 +525,10 @@ async def search_trending_posts(keywords: list[str], limit: int = 20) -> list[di
     except Exception as e:
         logger.error(f"Ошибка scraper: {e}")
 
+    # Сортируем по популярности (лайки + ответы) — лучшие посты вверх
     all_posts.sort(
         key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0),
         reverse=True
     )
+    logger.info(f"search_trending_posts: итого уникальных {len(all_posts)}, возвращаем {min(len(all_posts), limit)}")
     return all_posts[:limit]

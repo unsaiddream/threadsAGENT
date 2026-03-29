@@ -87,16 +87,6 @@ def init_db():
     c.execute("""
         UPDATE autopilot_settings SET reply_posts_count=10 WHERE id=1 AND reply_posts_count=5
     """)
-    # Ключевые слова для поиска постов: разговорные запросы которые пишут живые люди
-    import json as _json
-    new_keywords = _json.dumps([
-        "цены на продукты",
-        "а что с ценами",
-        "дорожают продукты",
-        "кто нибудь сравнивал цены",
-        "сравните цены",
-    ], ensure_ascii=False)
-    c.execute("UPDATE autopilot_settings SET keywords=? WHERE id=1", (new_keywords,))
 
     # Посты на которые уже отвечали (чтобы не дублировать)
     c.execute("""

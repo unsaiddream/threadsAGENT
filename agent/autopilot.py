@@ -201,6 +201,8 @@ _TIER3_PATTERNS = [
     "помогите найти дешевле", "как сэкономить на продукт",
     "цены на продукты", "цены выросли", "подорожало всё", "подорожали продукты",
     "почему так дорого", "почему всё так дорого",
+    "где купить дешевле", "рекомендуйте магазин", "какой магазин дешевле",
+    "цены в казахстан", "инфляция продукт", "бьёт по карман",
 ]
 
 # Уровень 2 (score=2): упоминает цены, экономию, магазины — хорошо для ответа
@@ -208,14 +210,28 @@ _TIER2_KEYWORDS = [
     "цен", "дорог", "дешев", "подорожа", "переплат", "экономи",
     "скидк", "акци", "чек ", "тенге", "₸", "бюджет",
     "магнум", "small", "арзан", "анвар", "galmart", "метро", "магазин",
+    "инфляц", "арбуз", "arbuz", "аибф", "airbaf", "супермаркет",
+    "корзин продукт", "стоимост", "прайс", "расценк",
 ]
 
 # Уровень 1 (score=1): только продукты без цен — слабый контекст
 _TIER1_FOOD = [
     "продукт", "молок", "хлеб", "яйц", "масл", "мясо", "куриц",
     "овощ", "фрукт", "банан", "помидор", "картош", "сахар",
-    "гречк", "рис ", "корзин", "покупк",
+    "гречк", "рис ", "корзин", "покупк", "говядин", "свинин",
+    "творог", "кефир", "сметан", "колбас", "сосиск", "макарон",
 ]
+
+# Хэндлы магазинов для тегирования в ответах
+_STORE_HANDLES = {
+    "магнум": "@magnumgo",
+    "magnum": "@magnumgo",
+    "арбуз": "@arbuz_kz",
+    "arbuz": "@arbuz_kz",
+    "airbaf": "@airbafresh",
+    "аибф": "@airbafresh",
+    "fresh": "@airbafresh",
+}
 
 
 def _score_post_relevance(text: str) -> int:
@@ -246,6 +262,21 @@ def _is_post_relevant(text: str) -> bool:
     return _score_post_relevance(text) >= 1
 
 
+def _detect_store_handles(text: str) -> list[str]:
+    """
+    Находит упомянутые в тексте магазины и возвращает их @хэндлы.
+    Используется для тегирования магазинов в ответах — показываем что мы сравниваем их.
+    """
+    t = text.lower()
+    found = []
+    seen = set()
+    for keyword, handle in _STORE_HANDLES.items():
+        if keyword in t and handle not in seen:
+            found.append(handle)
+            seen.add(handle)
+    return found[:2]  # не больше 2 тегов чтобы не спамить
+
+
 def _extract_product_keywords(text: str) -> list[str]:
     """Извлекает названия продуктов из текста поста для поиска на minprice.kz"""
     product_map = {
@@ -269,24 +300,37 @@ def _extract_product_keywords(text: str) -> list[str]:
 async def _fetch_prices_for_reply(product_keywords: list[str]) -> tuple[str, str]:
     """
     Загружает реальные цены для продуктов из поста.
+    Если конкретных продуктов нет — берём лучшие сделки дня как универсальный контекст.
     Возвращает (текст_для_промпта, лучшая_ссылка_на_товар).
     """
-    if not product_keywords:
-        return "", SITE_LINK
-
     lines = []
     best_link = SITE_LINK
-    for kw in product_keywords:
+
+    if product_keywords:
+        for kw in product_keywords:
+            try:
+                results = await search_prices(kw, limit=2)
+                for r in results:
+                    stores = r.get("stores", [])[:3]
+                    store_info = ", ".join(f"{s['store']}: {s['price']:.0f}₸" for s in stores)
+                    lines.append(f"{r['title']}: {store_info} → {r['link']}")
+                    if best_link == SITE_LINK:
+                        best_link = r["link"]
+            except Exception as e:
+                logger.warning(f"Цены для reply ({kw}): {e}")
+
+    # Если по конкретным продуктам ничего не нашли — берём топ-3 сделки дня
+    if not lines:
         try:
-            results = await search_prices(kw, limit=2)
-            for r in results:
-                stores = r.get("stores", [])[:3]
+            deals = await get_best_deals(limit=3, min_score=0.05)
+            for d in deals:
+                stores = d.get("stores", [])[:2]
                 store_info = ", ".join(f"{s['store']}: {s['price']:.0f}₸" for s in stores)
-                lines.append(f"{r['title']}: {store_info} → {r['link']}")
+                lines.append(f"{d['title']}: {store_info} → {d['link']}")
                 if best_link == SITE_LINK:
-                    best_link = r["link"]  # uuid-ссылка на первый найденный товар
+                    best_link = d["link"]
         except Exception as e:
-            logger.warning(f"Цены для reply ({kw}): {e}")
+            logger.warning(f"Fallback deals для reply: {e}")
 
     return "\n".join(lines), best_link
 
@@ -295,41 +339,70 @@ async def _generate_reply(target_text: str, score: int = 1) -> str | None:
     """
     Генерирует умный контекстный ответ на чужой пост.
     score — уровень релевантности (3=вопрос про цены, 2=упоминает цены, 1=продукты).
-    Определяет интент поста и строит ответ точно под него.
     """
     products = _extract_product_keywords(target_text)
     price_context, link = await _fetch_prices_for_reply(products)
 
     t = target_text.lower()
 
-    # Определяем интент для точного ответа
-    if any(p in t for p in ["сравни", "сравните", "сравнивал", "где дешевле", "кто нибудь", "посоветуй", "помогите"]):
-        intent = "Человек ПРОСИТ СРАВНЕНИЕ или помощь найти дешевле — дай прямой ответ: назови конкретный магазин и цену из данных, скажи что у тебя есть сравнение, дай ссылку"
-    elif any(p in t for p in ["дорожают", "дорожает", "дорого", "подорожал", "выросли", "растут цены", "всё дорожает"]):
-        intent = "Человек ЖАЛУЕТСЯ на рост цен — посочувствуй одним словом и сразу предложи конкретное решение: где сейчас дешевле с ценами из данных"
-    elif any(p in t for p in ["что с ценами", "а что с ценами", "почему цены", "куда цены"]):
-        intent = "Человек задаёт ВОПРОС про цены — ответь как знающий: дай конкретику с цифрами из данных, объясни где разница"
+    # Определяем интент и формат ответа
+    if any(p in t for p in ["сравни", "сравните", "сравнивал", "где дешевле", "где купить", "посоветуй", "помогите", "кто нибудь", "рекомендуй"]):
+        intent_type = "REQUEST"
+        intent_instruction = "Человек просит помощи найти где дешевле. Дай ПРЯМОЙ ответ: назови конкретный магазин и цену из данных ниже. Тон — как друг который реально знает цены."
+    elif any(p in t for p in ["дорожают", "дорожает", "дорого", "подорожал", "подорожали", "выросли", "растут цены", "всё дорожает", "вот это цены", "бьёт по карман"]):
+        intent_type = "COMPLAINT"
+        intent_instruction = "Человек жалуется на цены. Покажи что есть где дешевле — дай конкретную цену и магазин из данных. Не нуди, будь полезным."
+    elif any(p in t for p in ["что с ценами", "почему цены", "куда цены", "ценовая политика", "инфляция"]):
+        intent_type = "QUESTION"
+        intent_instruction = "Человек спрашивает про цены. Ответь конкретикой — цифры и магазины из данных. Коротко и по делу."
+    elif score == 3:
+        intent_type = "STRONG_SIGNAL"
+        intent_instruction = "Сильный сигнал что человеку важны цены. Дай самый полезный факт из данных — конкретный магазин и цена — и ссылку."
     else:
-        intent = "Человек упоминает цены или продукты — добавь ПОЛЕЗНЫЙ ФАКТ: конкретная цена из данных которая удивит, и ссылка"
+        intent_type = "MENTION"
+        intent_instruction = "Человек упоминает продукты или цены. Добавь один конкретный факт про цену из данных который его удивит."
 
-    price_block = f"АКТУАЛЬНЫЕ ЦЕНЫ ПРЯМО СЕЙЧАС:\n{price_context}\n\n" if price_context else ""
+    price_block = f"\nАКТУАЛЬНЫЕ ЦЕНЫ (используй эти данные):\n{price_context}\n" if price_context else ""
+
+    # Пинг магазинов: тегируем упомянутые в посте или в данных магазины
+    # Это показывает пользователям что мы реально сравниваем эти магазины
+    mentioned_handles = _detect_store_handles(target_text)
+    data_handles = _detect_store_handles(price_context)
+    all_handles = list(dict.fromkeys(mentioned_handles + data_handles))[:2]
+    store_tag_line = (
+        f"- Упомяни магазин(ы) с тегом: {' '.join(all_handles)} — вставь тег сразу после названия (напр. «в Магнуме {all_handles[0]}»)\n"
+        if all_handles else ""
+    )
+
+    examples_by_type = {
+        "REQUEST": "Пример: «В Магнуме (@magnumgo) 10 яиц — 380₸, в Анваре 395₸. Если брать пачку — Магнум выгоднее, все цены: [ссылка]»",
+        "COMPLAINT": "Пример: «Молоко в Арзане на 40₸ дешевле чем в Магнуме (@magnumgo) — 340₸ против 380₸. Не всё одинаково растёт: [ссылка]»",
+        "QUESTION": "Пример: «Бананы в Small за неделю выросли с 290₸ до 340₸, в Galmart пока 295₸. Такая картина: [ссылка]»",
+        "STRONG_SIGNAL": "Пример: «Гречка в Метро — 180₸, в Анваре 220₸, 25% разницы. Смотри сравнение: [ссылка]»",
+        "MENTION": "Пример: «Яйцо в Арзане на 60₸ дешевле чем в Магнуме (@magnumgo) — 320₸ против 380₸: [ссылка]»",
+    }
+    example = examples_by_type.get(intent_type, examples_by_type["MENTION"])
 
     prompt = f"""Чужой пост в Threads:
 "{target_text}"
 
-Ты — @minimalprice_kz, сервис сравнения цен на продукты в Казахстане.
+Ты — @minimalprice_kz, сервис сравнения цен на продукты в Казахстане. Отвечаешь как реальный человек.
+{price_block}
+ЗАДАЧА: {intent_instruction}
 
-{price_block}ЗАДАЧА: {intent}
+{example}
 
-Правила ответа:
-- Отвечай ПРЯМО на то что человек написал — никакого общего комментария
-- {"Используй КОНКРЕТНЫЕ цифры: магазин + цена из данных выше" if price_context else "Упомяни что можно сравнить цены по всем магазинам"}
-- Ссылка: {link} — добавь в конце естественно, не как рекламу
-- 1-2 предложения, живой разговорный тон
-- Звучи как человек который реально знает цены, НЕ как бот
-- НЕ начинай с: "Кстати", "Интересно", "О,", "Привет", "Да,"
+Правила:
+- Отвечай именно на ЭТОТ пост — не шаблонно
+- {"Используй цифры из данных выше — магазин + цена" if price_context else "Упомяни что можно сравнить цены на сайте"}
+{store_tag_line}- Ссылка {link} — один раз в конце, как часть фразы (не отдельной строкой)
+- 1-2 предложения максимум
+- НЕ начинай с: "Кстати", "Интересно", "О,", "Привет", "Да,", "Согласен"
+- Пиши как казахстанец — живым разговорным языком
 
-Верни ТОЛЬКО текст ответа. Без объяснений."""
+Если пост вообще не про еду/цены/магазины — напиши только: SKIP
+
+Верни ТОЛЬКО текст ответа."""
 
     response = _claude().messages.create(
         model="claude-sonnet-4-6",
@@ -361,35 +434,54 @@ async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dic
     """
     my_username = await get_my_username()
 
-    # 1. Ищем чужие посты через браузер — берём с запасом чтобы было из чего выбирать
-    scraped = await search_trending_posts(keywords, limit=count * 3)
+    # 1. Ищем чужие посты — большой буфер: count * 10 чтобы после фильтров точно хватило
+    # per_keyword в scraper теперь НЕ делится на кол-во keywords, поэтому даём реальный лимит
+    search_limit = count * 10
+    scraped = await search_trending_posts(keywords, limit=search_limit)
 
-    # Скорим и фильтруем
-    scored = []
+    # Скорим все посты
+    # - score > 0: релевантны, идут в приоритет
+    # - score = 0: найдены по нашим ключевым словам → они тоже относятся к теме
+    #   (scraper не ищет случайные посты), но ранжируем ниже
+    high_scored = []   # score >= 2
+    low_scored = []    # score == 1
+    zero_scored = []   # score == 0, но из релевантного поиска
+
     for p in scraped:
         if is_already_replied(p["id"]):
             continue
         if p.get("username") == my_username:
             continue
         s = _score_post_relevance(p.get("text", ""))
-        if s > 0:
-            p["_relevance_score"] = s
-            scored.append(p)
+        p["_relevance_score"] = s
+        if s >= 2:
+            high_scored.append(p)
+        elif s == 1:
+            low_scored.append(p)
+        else:
+            zero_scored.append(p)
 
-    # Сортируем: сначала score=3, потом 2, потом 1
-    scored.sort(key=lambda p: p["_relevance_score"], reverse=True)
+    # Сортируем каждый tier по популярности
+    for bucket in (high_scored, low_scored, zero_scored):
+        bucket.sort(key=lambda p: (p.get("like_count") or 0) + (p.get("replies_count") or 0), reverse=True)
 
-    # Логируем распределение для диагностики
-    dist = {3: 0, 2: 0, 1: 0}
-    for p in scored:
-        dist[p["_relevance_score"]] += 1
-    logger.info(f"Scraper нашёл {len(scored)} постов: tier3={dist[3]}, tier2={dist[2]}, tier1={dist[1]}")
+    # Собираем финальный список: сначала лучшие, добираем из lower tiers до count
+    scored = high_scored + low_scored + zero_scored
 
-    if scored:
+    dist = {3: 0, 2: 0, 1: 0, 0: 0}
+    for p in scraped:
+        dist[min(p.get("_relevance_score", 0), 3)] += 1
+    logger.info(
+        f"Scraper: raw={len(scraped)}, tier3={dist[3]}, tier2={dist[2]}, "
+        f"tier1={dist[1]}, tier0={dist[0]}, отфильтровано={len(scored)}"
+    )
+
+    if len(scored) >= count:
         return scored[:count]
 
-    # 2. Fallback: отвечаем на комментарии под своими постами
-    logger.info("Scraper не нашёл постов — используем комментарии под своими постами")
+    logger.info(f"Scraper дал только {len(scored)} постов — добираем из комментариев под своими постами")
+
+    # 2. Fallback: добираем из комментариев под своими постами
     posts_data = await get_my_posts(limit=20)
     my_posts = posts_data.get("data", [])
     posts_with_replies = [p for p in my_posts if (p.get("replies_count") or 0) > 0]
@@ -414,7 +506,9 @@ async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dic
         except Exception as e:
             logger.warning(f"Fallback replies error {post['id']}: {e}")
 
-    return fallback[:count]
+    # Объединяем scraper результаты с fallback комментариями
+    combined = scored + [f for f in fallback if f.get("id") not in {p.get("id") for p in scored}]
+    return combined[:count]
 
 
 async def run_test_post(notify_fn=None) -> dict:
@@ -722,3 +816,133 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
         await notify_fn(summary, topic="summary")
 
     return results
+
+
+# ── Реальное время: мониторинг свежих постов ─────────────────────────────
+_monitor_active = False
+_monitor_task = None
+
+
+def is_monitor_active() -> bool:
+    return _monitor_active
+
+
+async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_per_cycle: int = 3):
+    """
+    Мониторинг в реальном времени — ищет СВЕЖИЕ посты каждые N минут и сразу отвечает.
+    Использует вкладку 'Недавние' чтобы находить посты первыми — до того как другие успеют.
+
+    Чем раньше ответишь под свежим постом — тем выше видимость комментария.
+    """
+    global _monitor_active
+    _monitor_active = True
+
+    settings = get_autopilot_settings()
+    keywords = settings.get("keywords", [
+        "дорого", "дешевле", "цены", "подорожало",
+        "продукты цены", "Магнум дешевле",
+    ])
+
+    my_username = await get_my_username()
+
+    cycle = 0
+    logger.info(f"Монитор запущен: каждые {interval_minutes} мин, до {replies_per_cycle} ответов/цикл")
+
+    if notify_fn:
+        await notify_fn(
+            f"⚡ Монитор запущен!\n"
+            f"Ищу свежие посты каждые {interval_minutes} мин.\n"
+            f"Слова: {', '.join(keywords[:5])}{'...' if len(keywords) > 5 else ''}",
+            topic="replies"
+        )
+
+    while _monitor_active:
+        cycle += 1
+        logger.info(f"Монитор цикл {cycle}")
+
+        try:
+            # Ищем ТОЛЬКО свежие посты — вкладка "Недавние"
+            # Берём с запасом: replies_per_cycle * 8, чтобы хватило после фильтрации
+            scraped = await search_trending_posts(
+                keywords,
+                limit=replies_per_cycle * 8,
+                recent=True
+            )
+
+            # Фильтруем: не наши, не отвеченные, ранжируем по релевантности
+            candidates = []
+            for p in scraped:
+                if is_already_replied(p["id"]):
+                    continue
+                if p.get("username") == my_username:
+                    continue
+                s = _score_post_relevance(p.get("text", ""))
+                p["_relevance_score"] = s
+                candidates.append(p)
+
+            candidates.sort(key=lambda p: p["_relevance_score"], reverse=True)
+            to_reply = candidates[:replies_per_cycle]
+
+            if not to_reply:
+                logger.info(f"Цикл {cycle}: новых постов нет")
+            else:
+                logger.info(f"Цикл {cycle}: найдено {len(to_reply)} новых постов")
+                if notify_fn:
+                    sample = "\n".join([
+                        f"• @{p.get('username','?')} (score={p['_relevance_score']}): {p.get('text','')[:50]}..."
+                        for p in to_reply[:2]
+                    ])
+                    await notify_fn(f"⚡ Цикл {cycle}: {len(to_reply)} новых постов\n{sample}", topic="replies")
+
+                replied = 0
+                for target in to_reply:
+                    if not _monitor_active:
+                        break
+
+                    try:
+                        score = target.get("_relevance_score", 1)
+                        reply_text = await _generate_reply(target.get("text", ""), score=score)
+
+                        if reply_text is None:
+                            mark_replied(target["id"])
+                            continue
+
+                        result = await _do_reply(target, reply_text)
+
+                        if result.get("success"):
+                            mark_replied(target["id"])
+                            replied += 1
+                            if notify_fn:
+                                msg = _reply_notify_text(replied, len(to_reply), target, reply_text, result)
+                                await notify_fn(f"⚡ {msg}", topic="replies")
+                        else:
+                            err = result.get("error", "?")
+                            logger.warning(f"Monitor reply error: {err}")
+
+                        # Минимальная пауза между ответами (не спамим)
+                        if replied < len(to_reply):
+                            await asyncio.sleep(random.randint(30, 60))
+
+                    except Exception as e:
+                        logger.error(f"Monitor ответ ошибка: {e}")
+
+        except Exception as e:
+            logger.error(f"Monitor цикл {cycle} ошибка: {e}")
+            if notify_fn:
+                await notify_fn(f"⚠️ Монитор ошибка: {repr(e)[:200]}", topic="errors")
+
+        # Ждём следующего цикла
+        if _monitor_active:
+            logger.info(f"Монитор: жду {interval_minutes} мин до следующего цикла")
+            await asyncio.sleep(interval_minutes * 60)
+
+    logger.info("Монитор остановлен")
+    if notify_fn:
+        await notify_fn("⏹ Монитор остановлен.", topic="replies")
+
+
+def stop_monitor():
+    """Остановить мониторинг (следующий цикл не запустится)"""
+    global _monitor_active
+    _monitor_active = False
+    logger.info("Монитор: получена команда остановки")
