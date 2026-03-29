@@ -50,12 +50,21 @@ async def _click_recent_tab(page) -> bool:
     Нужна для мониторинга — находим самые свежие посты, не топ по лайкам.
     Возвращает True если вкладка найдена и кликнута.
     """
+    current_url = page.url or ""
+    if "serp_type=recent" in current_url:
+        logger.info("Поиск уже открыт в режиме 'Recent' по URL")
+        return True
+
     # Пробуем разные способы найти вкладку
     for selector in [
         '[role="tab"]:has-text("Недавние")',
         '[role="tab"]:has-text("Recent")',
         'div[role="tab"] >> text=Недавние',
         'div[role="tab"] >> text=Recent',
+        'a[href*="serp_type=recent"]:has-text("Recent")',
+        'a[href*="serp_type=recent"]:has-text("Недавние")',
+        'button:has-text("Recent")',
+        'button:has-text("Недавние")',
     ]:
         try:
             tab = page.locator(selector).first
@@ -67,15 +76,21 @@ async def _click_recent_tab(page) -> bool:
         except Exception:
             continue
 
-    # Fallback через JavaScript — ищем таб по тексту
+    # Fallback через JavaScript — ищем текст "Recent" в любом кликабельном узле
     clicked = await page.evaluate("""
         () => {
-            const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
-            for (const tab of tabs) {
-                const text = (tab.textContent || tab.innerText || '').trim();
-                if (text.includes('Недавние') || text.includes('Recent')) {
-                    tab.click();
-                    return text;
+            const nodes = Array.from(document.querySelectorAll('a, button, [role="tab"], [role="button"], [tabindex]'));
+            for (const node of nodes) {
+                const text = (node.textContent || node.innerText || '').trim();
+                const href = node.getAttribute('href') || '';
+                if (
+                    text.includes('Недавние') ||
+                    text.includes('Recent') ||
+                    href.includes('serp_type=recent')
+                ) {
+                    const clickable = node.closest('a, button, [role="tab"], [role="button"]') || node;
+                    clickable.click();
+                    return {text, href};
                 }
             }
             return null;
@@ -434,8 +449,10 @@ async def search_trending_posts(keywords: list[str], limit: int = 20, recent: bo
                 )
             )
             if cookies:
-                await context.add_cookies(cookies)
-                logger.info("Scraper: авторизован в Threads (sessionid есть)")
+                logger.info(
+                    "Scraper: для поиска работаю анонимно, хотя cookies есть. "
+                    "Авторизованный Threads часто редиректит /search в домашнюю ленту."
+                )
             else:
                 logger.info("Scraper: работаю анонимно (THREADS_SESSION_ID не задан)")
 
@@ -469,6 +486,9 @@ async def search_trending_posts(keywords: list[str], limit: int = 20, recent: bo
                     base_url = SEARCH_URL_RECENT if recent else SEARCH_URL_TOP
                     url = base_url.format(query=keyword.replace(" ", "+"))
                     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    if "/search" not in (page.url or ""):
+                        logger.warning(f"Поиск '{keyword}' редиректнул на {page.url} вместо search")
+                        continue
                     try:
                         await page.wait_for_selector('a[href*="/post/"]', timeout=10000)
                     except Exception:
