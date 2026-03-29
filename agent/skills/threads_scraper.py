@@ -9,13 +9,36 @@ Threads web scraper — ищет публичные посты через thread
 import json
 import logging
 import os
+import re
+import html
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 SEARCH_URL_TOP    = "https://www.threads.com/search?q={query}&serp_type=default"
 SEARCH_URL_RECENT = "https://www.threads.com/search?q={query}&serp_type=recent"
 SEARCH_URL = SEARCH_URL_TOP  # оставляем для совместимости
+
+
+def _normalize_threads_url(post_url: str) -> str:
+    parsed = urlparse(post_url.strip())
+    path = parsed.path.rstrip("/")
+    return f"https://www.threads.com{path}"
+
+
+def _extract_meta_content(html_text: str, key: str) -> str:
+    patterns = [
+        rf'<meta[^>]+property="{re.escape(key)}"[^>]+content="([^"]*)"',
+        rf'<meta[^>]+content="([^"]*)"[^>]+property="{re.escape(key)}"',
+        rf'<meta[^>]+name="{re.escape(key)}"[^>]+content="([^"]*)"',
+        rf'<meta[^>]+content="([^"]*)"[^>]+name="{re.escape(key)}"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return html.unescape(match.group(1)).strip()
+    return ""
 
 
 def _get_auth_cookies() -> list[dict]:
@@ -418,8 +441,85 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
 
     except ImportError:
         return {"error": "Playwright не установлен: pip install playwright && playwright install chromium"}
+
+
+async def fetch_post_by_url(post_url: str) -> dict:
+    """
+    Загружает публичный пост Threads по прямому URL и возвращает минимум данных,
+    которых достаточно для генерации точечного ответа.
+    """
+    normalized_url = _normalize_threads_url(post_url)
+
+    match = re.search(r"/@([^/]+)/post/([A-Za-z0-9_-]+)", normalized_url)
+    username = match.group(1) if match else ""
+    shortcode = match.group(2) if match else ""
+
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            )
+            page = await context.new_page()
+            try:
+                await page.goto(normalized_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2000)
+
+                meta = await page.evaluate("""
+                    () => {
+                        const pick = (selector) => {
+                            const el = document.querySelector(selector);
+                            return el ? (el.getAttribute('content') || '').trim() : '';
+                        };
+                        return {
+                            description: pick('meta[property="og:description"]')
+                                || pick('meta[name="description"]')
+                                || pick('meta[name="twitter:description"]'),
+                            title: pick('meta[property="og:title"]')
+                                || pick('meta[name="twitter:title"]'),
+                            url: location.href,
+                        };
+                    }
+                """)
+
+                text = html.unescape((meta or {}).get("description", "")).strip()
+                title = html.unescape((meta or {}).get("title", "")).strip()
+                page_url = (meta or {}).get("url", normalized_url)
+
+                if not username and title:
+                    user_match = re.search(r"\(@([^()]+)\)", title)
+                    if user_match:
+                        username = user_match.group(1)
+
+                if not text:
+                    html_text = await page.content()
+                    text = _extract_meta_content(html_text, "og:description") or _extract_meta_content(html_text, "description")
+
+                if not text:
+                    return {"error": "Не удалось извлечь текст поста из страницы"}
+
+                return {
+                    "id": f"sc:{shortcode}" if shortcode else normalized_url,
+                    "shortcode": shortcode,
+                    "username": username,
+                    "text": text[:1000],
+                    "post_url": _normalize_threads_url(page_url),
+                    "via_browser": True,
+                }
+            finally:
+                await browser.close()
+
     except Exception as e:
-        return {"error": f"Browser reply error: {e}"}
+        return {"error": f"Ошибка чтения поста: {e}"}
 
 
 async def search_trending_posts(keywords: list[str], limit: int = 20, recent: bool = False) -> list[dict]:

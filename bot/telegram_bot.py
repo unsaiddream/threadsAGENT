@@ -28,6 +28,18 @@ def is_authorized(update: Update) -> bool:
     return update.effective_user.id == allowed_id
 
 
+def can_use_reply_url(update: Update) -> bool:
+    return True
+
+
+async def deny_non_owner(update: Update):
+    if update.message:
+        await update.message.reply_text(
+            "Эта команда доступна только владельцу бота.\n"
+            "Для всех пользователей доступна только: /reply_url <ссылка_на_post>"
+        )
+
+
 CHANNEL_ID = -1003864267239  # Группа/канал для отчётов автопилота
 
 # Топики для канала (создаются один раз, ID хранятся в БД)
@@ -128,7 +140,9 @@ async def notify(text: str, group_only: bool = False, topic: str = None):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
-        await update.message.reply_text("Доступ запрещён.")
+        await update.message.reply_text(
+            "Можно прислать команду /reply_url <ссылка_на_post> — я сгенерирую один контекстный ответ на конкретный пост Threads."
+        )
         return
 
     await update.message.reply_text(
@@ -149,6 +163,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
+        await update.message.reply_text(
+            "Доступная команда:\n"
+            "/reply_url <ссылка_на_post> — сгенерировать и отправить один ответ на конкретный пост Threads"
+        )
         return
 
     await update.message.reply_text(
@@ -184,6 +202,7 @@ def _format_cost(result: dict) -> str:
 
 async def posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     await update.message.reply_text("Загружаю посты из Threads...")
@@ -194,6 +213,7 @@ async def posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from database.db import get_conn
@@ -207,6 +227,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def autopilot_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать статус и настройки автопилота"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from database.db import get_autopilot_settings
@@ -233,6 +254,7 @@ async def autopilot_status_command(update: Update, context: ContextTypes.DEFAULT
 
 async def autopilot_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from database.db import update_autopilot_settings
@@ -246,6 +268,7 @@ async def autopilot_on_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def autopilot_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from database.db import update_autopilot_settings
@@ -256,6 +279,7 @@ async def autopilot_off_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def run_autopilot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запустить автопилот немедленно"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     await update.message.reply_text(
@@ -274,6 +298,7 @@ async def run_autopilot_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def test_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Опубликовать один тестовый пост (для проверки новых фич)"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     await update.message.reply_text("🧪 Генерирую один тестовый пост...")
@@ -287,6 +312,7 @@ async def test_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_replies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запустить только ответы на чужие посты"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     await update.message.reply_text(
@@ -303,6 +329,7 @@ async def run_replies_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def monitor_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать статус монитора реального времени"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from agent.autopilot import is_monitor_active
@@ -320,6 +347,7 @@ async def monitor_status_command(update: Update, context: ContextTypes.DEFAULT_T
 async def monitor_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Включить мониторинг в реальном времени"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from agent.autopilot import is_monitor_active, run_monitor_loop
@@ -350,6 +378,7 @@ async def monitor_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def monitor_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Остановить мониторинг"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from agent.autopilot import stop_monitor, is_monitor_active
@@ -365,6 +394,7 @@ async def monitor_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def check_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Диагностика: показать комментарии под своими постами"""
     if not is_authorized(update):
+        await deny_non_owner(update)
         return
 
     from agent.skills.threads import get_my_posts, get_post_replies
@@ -396,9 +426,52 @@ async def check_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def reply_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сгенерировать и отправить один ответ на конкретный URL поста Threads"""
+    if not can_use_reply_url(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/reply_url https://www.threads.com/@username/post/SHORTCODE"
+        )
+        return
+
+    post_url = context.args[0].strip()
+    if "threads.com/" not in post_url and "threads.net/" not in post_url:
+        await update.message.reply_text("Нужна ссылка именно на пост Threads.")
+        return
+
+    await update.message.reply_text("Открываю пост, генерирую ответ и пробую опубликовать...")
+
+    from agent.autopilot import reply_to_post_url
+
+    try:
+        result = await reply_to_post_url(post_url)
+        if result.get("success"):
+            target = result.get("target", {})
+            reply_text = result.get("reply_text", "")
+            await update.message.reply_text(
+                f"✅ Ответ опубликован для @{target.get('username', '?')}:\n\n"
+                f"{reply_text}"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Не получилось ответить.\n"
+                f"{result.get('error', 'неизвестная ошибка')}"
+            )
+    except Exception as e:
+        logger.error(f"reply_url error: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
-        await update.message.reply_text("Доступ запрещён.")
+        await update.message.reply_text(
+            "Обычные сообщения и остальные команды доступны только владельцу.\n"
+            "Для всех пользователей доступна команда: /reply_url <ссылка_на_post>"
+        )
         return
 
     user_text = update.message.text
@@ -431,6 +504,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _setup_bot_commands(app: Application):
     """Регистрирует команды в меню Telegram (вызывается при старте)."""
     commands = [
+        BotCommand("reply_url",     "Ответить на конкретный пост Threads по ссылке"),
         BotCommand("monitor_on",    "⚡ Мониторинг в реальном времени (каждые 3 мин)"),
         BotCommand("monitor_off",   "⏹ Остановить мониторинг"),
         BotCommand("monitor",       "Статус мониторинга"),
@@ -464,6 +538,7 @@ def create_bot() -> Application:
 
     _app.add_handler(CommandHandler("start", start_command))
     _app.add_handler(CommandHandler("help", help_command))
+    _app.add_handler(CommandHandler("reply_url", reply_url_command))
     _app.add_handler(CommandHandler("posts", posts_command))
     _app.add_handler(CommandHandler("clear", clear_command))
     _app.add_handler(CommandHandler("autopilot", autopilot_status_command))

@@ -12,7 +12,7 @@ import anthropic
 import os
 
 from agent.skills.threads import post_text, post_with_image, reply_to_post, get_my_posts, get_post_replies, get_my_username
-from agent.skills.threads_scraper import search_trending_posts, reply_via_browser
+from agent.skills.threads_scraper import search_trending_posts, reply_via_browser, fetch_post_by_url
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     get_multi_store_products, get_price_drops,
@@ -946,3 +946,28 @@ def stop_monitor():
     global _monitor_active
     _monitor_active = False
     logger.info("Монитор: получена команда остановки")
+
+
+async def reply_to_post_url(post_url: str) -> dict:
+    """
+    Сгенерировать и отправить один контекстный ответ на конкретный публичный пост Threads.
+    Для публикации используем браузерный reply, потому что по URL у нас нет гарантированного media pk.
+    """
+    target = await fetch_post_by_url(post_url)
+    if target.get("error"):
+        return {"success": False, "error": target["error"]}
+
+    score = _score_post_relevance(target.get("text", ""))
+    reply_text = await _generate_reply(target.get("text", ""), score=max(score, 1))
+
+    if reply_text is None:
+        return {
+            "success": False,
+            "error": "Пост не выглядит релевантным для цен/продуктов, ответ пропущен",
+            "target": target,
+        }
+
+    result = await _do_reply(target, reply_text)
+    result["reply_text"] = reply_text
+    result["target"] = target
+    return result
