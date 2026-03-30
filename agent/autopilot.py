@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 MIN_DELAY_SEC = 45
 MAX_DELAY_SEC = 120
 
+# In-memory кеш SKIP'd постов — не сохраняем в БД, чтобы не засорять replied_posts
+# При рестарте бота снова попробуем эти посты — это нормально
+_session_skip_cache: set[str] = set()
+
+# Статистика последнего цикла монитора (для /monitor команды)
+_monitor_last_stats: dict = {"cycle": 0, "found": 0, "replied": 0, "skipped": 0, "time": None}
+
 # Продукты для мониторинга цен каждый день
 DAILY_PRODUCTS = [
     "бананы", "молоко", "яйца", "хлеб", "помидоры",
@@ -335,10 +342,11 @@ async def _fetch_prices_for_reply(product_keywords: list[str]) -> tuple[str, str
     return "\n".join(lines), best_link
 
 
-async def _generate_reply(target_text: str, score: int = 1) -> str | None:
+async def _generate_reply(target_text: str, score: int = 1, allow_skip: bool = True) -> str | None:
     """
     Генерирует умный контекстный ответ на чужой пост.
     score — уровень релевантности (3=вопрос про цены, 2=упоминает цены, 1=продукты).
+    allow_skip=False — не возвращать SKIP (используется для /reply_url где юзер явно просит ответ).
     """
     products = _extract_product_keywords(target_text)
     price_context, link = await _fetch_prices_for_reply(products)
@@ -400,9 +408,14 @@ async def _generate_reply(target_text: str, score: int = 1) -> str | None:
 - НЕ начинай с: "Кстати", "Интересно", "О,", "Привет", "Да,", "Согласен"
 - Пиши как казахстанец — живым разговорным языком
 
-Если пост вообще не про еду/цены/магазины — напиши только: SKIP
-
 Верни ТОЛЬКО текст ответа."""
+
+    # SKIP-инструкция только для автоматических ответов (не для /reply_url где юзер явно хочет ответ)
+    if allow_skip:
+        prompt = prompt.replace(
+            "\nВерни ТОЛЬКО текст ответа.",
+            "\nЕсли пост совершенно не про еду/цены/магазины/экономию — напиши только: SKIP\n\nВерни ТОЛЬКО текст ответа."
+        )
 
     response = _claude().messages.create(
         model="claude-sonnet-4-6",
@@ -449,6 +462,8 @@ async def _collect_reply_candidates(keywords: list[str], count: int) -> list[dic
 
     for p in scraped:
         if is_already_replied(p["id"]):
+            continue
+        if p["id"] in _session_skip_cache:
             continue
         if p.get("username") == my_username:
             continue
@@ -643,7 +658,8 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
             reply_text = await _generate_reply(combined_text, score=score)
 
             if reply_text is None:
-                mark_replied(target["id"])
+                # SKIP — не помечаем в БД, только в памяти (чтобы не попасть в следующий цикл)
+                _session_skip_cache.add(target["id"])
                 continue
 
             result = await _do_reply(target, reply_text)
@@ -763,8 +779,10 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
         replied_count = 0
         for i, target in enumerate(to_reply):
             try:
-                delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
-                await asyncio.sleep(delay)
+                # Пауза МЕЖДУ ответами (не перед первым — первый сразу)
+                if i > 0:
+                    delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
+                    await asyncio.sleep(delay)
 
                 context = target.get("_parent_post_text", "")
                 combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
@@ -772,7 +790,8 @@ async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
                 reply_text = await _generate_reply(combined_text, score=score)
 
                 if reply_text is None:
-                    mark_replied(target["id"])
+                    # SKIP — только в памяти, не в БД
+                    _session_skip_cache.add(target["id"])
                     continue
 
                 result = await _do_reply(target, reply_text)
@@ -869,22 +888,35 @@ async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_pe
                 recent=True
             )
 
-            # Фильтруем: не наши, не отвеченные, ранжируем по релевантности
+            # Фильтруем: не наши, не отвеченные, score >= 1 (score=0 — нерелевантные)
             candidates = []
             for p in scraped:
                 if is_already_replied(p["id"]):
                     continue
+                if p["id"] in _session_skip_cache:
+                    continue
                 if p.get("username") == my_username:
                     continue
                 s = _score_post_relevance(p.get("text", ""))
+                if s == 0:
+                    continue  # Полностью нерелевантные — пропускаем молча
                 p["_relevance_score"] = s
                 candidates.append(p)
 
             candidates.sort(key=lambda p: p["_relevance_score"], reverse=True)
             to_reply = candidates[:replies_per_cycle]
 
+            # Обновляем статистику для /monitor
+            _monitor_last_stats.update({
+                "cycle": cycle,
+                "found": len(candidates),
+                "replied": 0,
+                "skipped": 0,
+                "time": datetime.now().strftime("%H:%M"),
+            })
+
             if not to_reply:
-                logger.info(f"Цикл {cycle}: новых постов нет")
+                logger.info(f"Цикл {cycle}: новых постов нет (scraped={len(scraped)}, relevant={len(candidates)})")
             else:
                 logger.info(f"Цикл {cycle}: найдено {len(to_reply)} новых постов")
                 if notify_fn:
@@ -895,6 +927,7 @@ async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_pe
                     await notify_fn(f"⚡ Цикл {cycle}: {len(to_reply)} новых постов\n{sample}", topic="replies")
 
                 replied = 0
+                skipped = 0
                 for target in to_reply:
                     if not _monitor_active:
                         break
@@ -904,7 +937,9 @@ async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_pe
                         reply_text = await _generate_reply(target.get("text", ""), score=score)
 
                         if reply_text is None:
-                            mark_replied(target["id"])
+                            # SKIP — только в памяти, не в БД
+                            _session_skip_cache.add(target["id"])
+                            skipped += 1
                             continue
 
                         result = await _do_reply(target, reply_text)
@@ -918,6 +953,8 @@ async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_pe
                         else:
                             err = result.get("error", "?")
                             logger.warning(f"Monitor reply error: {err}")
+                            if notify_fn:
+                                await notify_fn(f"⚠️ Цикл {cycle} ошибка ответа:\n{err[:300]}", topic="errors")
 
                         # Минимальная пауза между ответами (не спамим)
                         if replied < len(to_reply):
@@ -925,6 +962,8 @@ async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_pe
 
                     except Exception as e:
                         logger.error(f"Monitor ответ ошибка: {e}")
+
+                _monitor_last_stats.update({"replied": replied, "skipped": skipped})
 
         except Exception as e:
             logger.error(f"Monitor цикл {cycle} ошибка: {e}")
@@ -958,12 +997,13 @@ async def reply_to_post_url(post_url: str) -> dict:
         return {"success": False, "error": target["error"]}
 
     score = _score_post_relevance(target.get("text", ""))
-    reply_text = await _generate_reply(target.get("text", ""), score=max(score, 1))
+    # allow_skip=False — юзер явно просит ответить на этот конкретный пост, не пропускаем
+    reply_text = await _generate_reply(target.get("text", ""), score=max(score, 1), allow_skip=False)
 
     if reply_text is None:
         return {
             "success": False,
-            "error": "Пост не выглядит релевантным для цен/продуктов, ответ пропущен",
+            "error": "Не удалось сгенерировать ответ",
             "target": target,
         }
 

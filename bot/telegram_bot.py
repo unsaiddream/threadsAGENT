@@ -332,13 +332,24 @@ async def monitor_status_command(update: Update, context: ContextTypes.DEFAULT_T
         await deny_non_owner(update)
         return
 
-    from agent.autopilot import is_monitor_active
+    from agent.autopilot import is_monitor_active, _monitor_last_stats
     active = is_monitor_active()
     status = "🟢 работает" if active else "🔴 остановлен"
+
+    stats = _monitor_last_stats
+    if stats.get("cycle"):
+        last_info = (
+            f"\nПоследний цикл #{stats['cycle']} в {stats.get('time','?')}:\n"
+            f"  найдено: {stats['found']} постов\n"
+            f"  ответов: {stats['replied']}\n"
+            f"  пропущено: {stats['skipped']}"
+        )
+    else:
+        last_info = "\nЦиклов ещё не было с последнего запуска."
+
     await update.message.reply_text(
-        f"Монитор реального времени: {status}\n\n"
-        "Мониторинг ищет СВЕЖИЕ посты каждые 3 минуты\n"
-        "и сразу отвечает — пока другие ещё не успели.\n\n"
+        f"Монитор реального времени: {status}{last_info}\n\n"
+        "Ищет СВЕЖИЕ посты каждые 3 мин и сразу отвечает.\n\n"
         "/monitor_on — включить\n"
         "/monitor_off — выключить"
     )
