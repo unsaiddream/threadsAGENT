@@ -463,14 +463,23 @@ async def reply_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result.get("success"):
             target = result.get("target", {})
             reply_text = result.get("reply_text", "")
+            method = "🌐 API" if not result.get("target", {}).get("via_browser") else "🖥 браузер"
             await update.message.reply_text(
-                f"✅ Ответ опубликован для @{target.get('username', '?')}:\n\n"
+                f"✅ Ответ опубликован [{method}] → @{target.get('username', '?')}:\n\n"
                 f"{reply_text}"
             )
         else:
+            err = result.get("error", "неизвестная ошибка")
+            hint = ""
+            if "не залогинен" in err or "sessionid" in err.lower() or "поле ввода" in err:
+                hint = (
+                    "\n\n💡 Нужно обновить куки сессии Threads:\n"
+                    "1. Открой threads.com → DevTools → Application → Cookies\n"
+                    "2. Скопируй значения sessionid, csrftoken, ds_user_id, ig_did, mid\n"
+                    "3. Обнови в .env файле"
+                )
             await update.message.reply_text(
-                "❌ Не получилось ответить.\n"
-                f"{result.get('error', 'неизвестная ошибка')}"
+                f"❌ Не получилось ответить.\n{err}{hint}"
             )
     except Exception as e:
         logger.error(f"reply_url error: {e}")

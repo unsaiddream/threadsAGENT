@@ -443,10 +443,37 @@ async def reply_via_browser(post_url: str, reply_text: str) -> dict:
         return {"error": "Playwright не установлен: pip install playwright && playwright install chromium"}
 
 
+def _find_pk_in_json(data, shortcode: str) -> str | None:
+    """
+    Рекурсивно ищет pk поста по shortcode (code) в GraphQL-ответе.
+    pk — реальный числовой media ID, нужен для Threads API reply.
+    """
+    if isinstance(data, dict):
+        code = data.get("code", "")
+        pk = str(data.get("pk") or "")
+        if code == shortcode and pk:
+            return pk
+        for v in data.values():
+            result = _find_pk_in_json(v, shortcode)
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _find_pk_in_json(item, shortcode)
+            if result:
+                return result
+    return None
+
+
 async def fetch_post_by_url(post_url: str) -> dict:
     """
-    Загружает публичный пост Threads по прямому URL и возвращает минимум данных,
-    которых достаточно для генерации точечного ответа.
+    Загружает публичный пост Threads по прямому URL.
+
+    Стратегия (приоритет):
+    1. Перехватываем GraphQL при загрузке страницы → получаем реальный pk
+       → ставим via_browser=False → ответ через официальный API (надёжно, не нужен sessionid)
+    2. Fallback: берём текст из og:meta + via_browser=True → браузерный reply
+       (требует THREADS_SESSION_ID)
     """
     normalized_url = _normalize_threads_url(post_url)
 
@@ -469,10 +496,33 @@ async def fetch_post_by_url(post_url: str) -> dict:
                     "Chrome/120.0.0.0 Safari/537.36"
                 )
             )
+
+            # Перехватываем GraphQL-ответы чтобы получить реальный pk поста
+            api_pk: list[str] = []  # list чтобы можно было мутировать из callback
+
+            async def on_response(response):
+                try:
+                    if response.status != 200:
+                        return
+                    ctype = response.headers.get("content-type", "")
+                    if "json" not in ctype:
+                        return
+                    body = await response.text()
+                    if '"pk"' in body and shortcode in body:
+                        data = json.loads(body)
+                        pk = _find_pk_in_json(data, shortcode)
+                        if pk and not api_pk:
+                            api_pk.append(pk)
+                            logger.info(f"fetch_post_by_url: нашёл pk={pk} для shortcode={shortcode}")
+                except Exception:
+                    pass
+
             page = await context.new_page()
+            page.on("response", on_response)
+
             try:
                 await page.goto(normalized_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(2500)
 
                 meta = await page.evaluate("""
                     () => {
@@ -507,14 +557,30 @@ async def fetch_post_by_url(post_url: str) -> dict:
                 if not text:
                     return {"error": "Не удалось извлечь текст поста из страницы"}
 
-                return {
-                    "id": f"sc:{shortcode}" if shortcode else normalized_url,
-                    "shortcode": shortcode,
-                    "username": username,
-                    "text": text[:1000],
-                    "post_url": _normalize_threads_url(page_url),
-                    "via_browser": True,
-                }
+                real_pk = api_pk[0] if api_pk else None
+
+                if real_pk:
+                    # Есть реальный pk → используем Threads API reply (не нужен sessionid)
+                    logger.info(f"fetch_post_by_url: вернём pk={real_pk}, via_browser=False")
+                    return {
+                        "id": real_pk,
+                        "shortcode": shortcode,
+                        "username": username,
+                        "text": text[:1000],
+                        "post_url": _normalize_threads_url(page_url),
+                        "via_browser": False,
+                    }
+                else:
+                    # Нет pk → браузерный reply (нужен THREADS_SESSION_ID)
+                    logger.info(f"fetch_post_by_url: pk не найден, via_browser=True")
+                    return {
+                        "id": f"sc:{shortcode}" if shortcode else normalized_url,
+                        "shortcode": shortcode,
+                        "username": username,
+                        "text": text[:1000],
+                        "post_url": _normalize_threads_url(page_url),
+                        "via_browser": True,
+                    }
             finally:
                 await browser.close()
 
