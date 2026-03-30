@@ -437,6 +437,28 @@ async def check_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def decoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запустить decoy цикл вручную: создать жалобный пост + ответить на него"""
+    if not is_authorized(update):
+        await deny_non_owner(update)
+        return
+
+    if not os.getenv("DECOY_THREADS_ACCESS_TOKEN"):
+        await update.message.reply_text(
+            "❌ DECOY_THREADS_ACCESS_TOKEN не задан в .env\n"
+            "Добавь API токен второго аккаунта."
+        )
+        return
+
+    await update.message.reply_text("🎭 Запускаю decoy цикл (создаю жалобный пост + отвечаю)...")
+
+    from agent.autopilot import run_decoy_cycle
+    result = await run_decoy_cycle(notify_fn=notify)
+
+    if not result.get("success"):
+        await update.message.reply_text(f"❌ Ошибка: {result.get('error', '?')}")
+
+
 async def reply_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сгенерировать и отправить один ответ на конкретный URL поста Threads"""
     if not can_use_reply_url(update):
@@ -534,6 +556,7 @@ async def _setup_bot_commands(app: Application):
         BotCommand("autopilot_on",  "Включить автопилот по расписанию"),
         BotCommand("autopilot_off", "Выключить автопилот"),
         BotCommand("autopilot",     "Статус автопилота"),
+        BotCommand("decoy",         "🎭 Создать жалобный пост + ответить (искусственный трафик)"),
         BotCommand("check_search",  "Проверить поиск Threads"),
         BotCommand("clear",         "Очистить историю чата"),
         BotCommand("help",          "Список команд"),
@@ -570,6 +593,7 @@ def create_bot() -> Application:
     _app.add_handler(CommandHandler("monitor", monitor_status_command))
     _app.add_handler(CommandHandler("monitor_on", monitor_on_command))
     _app.add_handler(CommandHandler("monitor_off", monitor_off_command))
+    _app.add_handler(CommandHandler("decoy", decoy_command))
     _app.add_handler(CommandHandler("check_search", check_search_command))
     _app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

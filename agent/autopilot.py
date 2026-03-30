@@ -13,6 +13,7 @@ import os
 
 from agent.skills.threads import post_text, post_with_image, reply_to_post, get_my_posts, get_post_replies, get_my_username
 from agent.skills.threads_scraper import search_trending_posts, reply_via_browser, fetch_post_by_url
+from agent.skills.decoy_account import post_as_decoy
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     get_multi_store_products, get_price_drops,
@@ -617,6 +618,134 @@ async def run_test_post(notify_fn=None) -> dict:
         return {"success": False, "error": repr(e)}
 
 
+async def _generate_decoy_post_text() -> str:
+    """
+    Генерирует через Claude реалистичный жалобный пост о ценах
+    с упоминанием казахстанских магазинов.
+    """
+    client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    shops = ["@airbafresh", "@magnumgo", "@arbuz_kz"]
+    # Каждый раз разный магазин чтобы не повторяться
+    featured_shop = random.choice(shops)
+    other_shops = [s for s in shops if s != featured_shop]
+
+    prompt = f"""Напиши короткий пост в Threads от лица обычного казахстанца — жалоба на высокие цены в магазинах.
+
+Требования:
+- Обязательно упомяни {featured_shop} (основной) и можно {other_shops[0]} вскользь
+- Упомяни конкретный продукт: молоко, яйца, мясо, хлеб, овощи или фрукты
+- Назови конкретную цену в тенге (реалистичная для Казахстана 2025)
+- Тон: живой, эмоциональный, разговорный — как обычный пост в соцсети
+- Можно вопрос к подписчикам ("где вы берёте?", "это норм вообще?")
+- 1-3 предложения, не длинно
+- НЕ пиши hashtag'и
+- НЕ упоминай @minimalprice_kz (это другой аккаунт)
+- Пиши на русском, иногда казахские слова ок
+
+Верни ТОЛЬКО текст поста, без кавычек."""
+
+    resp = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return resp.content[0].text.strip()
+
+
+async def run_decoy_cycle(notify_fn=None) -> dict:
+    """
+    Полный цикл искусственного трафика:
+    1. Генерирует жалобный пост о ценах
+    2. Публикует от decoy аккаунта
+    3. Ждёт немного (имитация реального пользователя)
+    4. Основной бот отвечает на этот пост
+
+    Вызывается автоматически когда нет реальных кандидатов для ответа,
+    или вручную через /decoy команду.
+    """
+    if not os.getenv("DECOY_THREADS_ACCESS_TOKEN"):
+        return {"success": False, "error": "DECOY_THREADS_ACCESS_TOKEN не задан в .env"}
+
+    if notify_fn:
+        await notify_fn("🎭 Нет реальных постов → запускаю decoy цикл...", topic="replies")
+
+    # Шаг 1: генерируем текст жалобы
+    try:
+        decoy_text = await _generate_decoy_post_text()
+        logger.info(f"Decoy пост: {decoy_text[:80]}")
+    except Exception as e:
+        err = f"Ошибка генерации decoy поста: {e}"
+        logger.error(err)
+        if notify_fn:
+            await notify_fn(f"❌ {err}", topic="errors")
+        return {"success": False, "error": err}
+
+    # Шаг 2: публикуем от decoy аккаунта
+    decoy_result = await post_as_decoy(decoy_text)
+    if not decoy_result.get("success"):
+        err = decoy_result.get("error", "?")
+        logger.error(f"Decoy публикация провалилась: {err}")
+        if notify_fn:
+            await notify_fn(f"❌ Decoy пост не вышел: {err}", topic="errors")
+        return {"success": False, "error": err}
+
+    media_id = decoy_result["media_id"]
+    permalink = decoy_result.get("permalink") or ""
+    logger.info(f"Decoy пост опубликован: {permalink}")
+
+    if notify_fn:
+        await notify_fn(
+            f"🎭 Decoy пост опубликован:\n\"{decoy_text}\"\n{permalink}",
+            topic="replies"
+        )
+
+    # Шаг 3: пауза (30-90 сек) — имитируем что основной бот "увидел" пост органически
+    delay = random.randint(30, 90)
+    logger.info(f"Decoy: жду {delay}с перед ответом...")
+    await asyncio.sleep(delay)
+
+    # Шаг 4: генерируем ответ от основного аккаунта
+    score = _score_post_relevance(decoy_text)
+    reply_text = await _generate_reply(decoy_text, score=max(score, 2), allow_skip=False)
+
+    if not reply_text:
+        err = "Claude не смог сгенерировать ответ на decoy пост"
+        logger.warning(err)
+        if notify_fn:
+            await notify_fn(f"⚠️ {err}", topic="errors")
+        return {"success": False, "error": err}
+
+    # Шаг 5: отвечаем через основной аккаунт via API (media_id — реальный pk)
+    target = {
+        "id": media_id,
+        "text": decoy_text,
+        "username": "decoy",
+        "post_url": permalink,
+        "via_browser": False,
+    }
+    reply_result = await _do_reply(target, reply_text)
+
+    if reply_result.get("success"):
+        mark_replied(media_id)
+        log_action("decoy_cycle_success", decoy_text[:100], reply_text[:100])
+        if notify_fn:
+            await notify_fn(
+                f"✅ Decoy цикл завершён!\n"
+                f"🎭 Жалоба: \"{decoy_text[:80]}\"\n"
+                f"💬 Наш ответ: \"{reply_text}\"\n"
+                f"🔗 {permalink}",
+                topic="replies"
+            )
+        return {"success": True, "decoy_text": decoy_text, "reply_text": reply_text, "permalink": permalink}
+    else:
+        err = reply_result.get("error", "?")
+        logger.error(f"Decoy: ответ не вышел: {err}")
+        if notify_fn:
+            await notify_fn(f"❌ Decoy ответ не опубликован: {err}", topic="errors")
+        return {"success": False, "error": err}
+
+
 async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
     """
     Ищет трендовые посты по ключевым словам через Playwright scraper
@@ -638,8 +767,9 @@ async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
 
     if not candidates:
         if notify_fn:
-            await notify_fn("Не найдено постов для ответов.", topic="replies")
-        return {"replies_published": 0, "errors": []}
+            await notify_fn("Реальных постов не найдено → запускаю decoy цикл.", topic="replies")
+        decoy = await run_decoy_cycle(notify_fn=notify_fn)
+        return {"replies_published": 1 if decoy.get("success") else 0, "errors": [], "decoy": decoy}
 
     if notify_fn:
         sample_info = "\n".join(
@@ -917,6 +1047,8 @@ async def run_monitor_loop(notify_fn=None, interval_minutes: int = 3, replies_pe
 
             if not to_reply:
                 logger.info(f"Цикл {cycle}: новых постов нет (scraped={len(scraped)}, relevant={len(candidates)})")
+                if os.getenv("DECOY_THREADS_ACCESS_TOKEN"):
+                    await run_decoy_cycle(notify_fn=notify_fn)
             else:
                 logger.info(f"Цикл {cycle}: найдено {len(to_reply)} новых постов")
                 if notify_fn:
