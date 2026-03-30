@@ -4,6 +4,7 @@ Decoy аккаунт Threads — создаёт "жалобные" посты о
 
 Флоу: decoy создаёт пост → основной бот на него отвечает.
 """
+import asyncio
 import httpx
 import os
 import logging
@@ -90,6 +91,10 @@ async def post_as_decoy(text: str) -> dict:
 
             container_id = resp.json().get("id")
             logger.info(f"Decoy: контейнер создан {container_id}")
+
+            # Threads API требует паузу между созданием контейнера и публикацией
+            # Без задержки возвращает "resource does not exist" (error_subcode 4279009)
+            await asyncio.sleep(5)
 
             # Шаг 2: опубликовать
             pub_resp = await client.post(

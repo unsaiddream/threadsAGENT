@@ -2,6 +2,7 @@
 Threads Meta API — публикация постов, медиа, получение статистики
 Документация: https://developers.facebook.com/docs/threads
 """
+import asyncio
 import httpx
 import os
 from database.db import save_threads_post, log_action
@@ -40,6 +41,9 @@ async def post_text(text: str) -> dict:
             return {"error": f"Ошибка создания поста: {resp.text}"}
 
         container_id = resp.json().get("id")
+
+        # Threads API требует паузу между созданием контейнера и публикацией
+        await asyncio.sleep(5)
 
         # Шаг 2: опубликовать
         pub_resp = await client.post(
@@ -98,6 +102,7 @@ async def post_with_image(text: str, image_url: str) -> dict:
             return {"error": f"Ошибка создания поста с изображением: {resp.text}"}
 
         container_id = resp.json().get("id")
+        await asyncio.sleep(5)
 
         pub_resp = await client.post(
             f"{THREADS_API_BASE}/{user_id}/threads_publish",
@@ -138,6 +143,7 @@ async def reply_to_post(post_id: str, text: str) -> dict:
             return {"error": f"Ошибка создания ответа: {resp.text}"}
 
         container_id = resp.json().get("id")
+        await asyncio.sleep(5)
 
         pub_resp = await client.post(
             f"{THREADS_API_BASE}/{user_id}/threads_publish",
