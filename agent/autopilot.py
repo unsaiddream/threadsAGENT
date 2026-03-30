@@ -716,13 +716,14 @@ async def run_decoy_cycle(notify_fn=None) -> dict:
             await notify_fn(f"⚠️ {err}", topic="errors")
         return {"success": False, "error": err}
 
-    # Шаг 5: отвечаем через основной аккаунт via API (media_id — реальный pk)
+    # Шаг 5: отвечаем через основной аккаунт через браузер (Threads API не разрешает
+    # отвечать на чужие посты — error 4279015, нужен browser reply с session cookies)
     target = {
-        "id": media_id,
+        "id": f"sc:{permalink.split('/post/')[-1]}" if permalink else media_id,
         "text": decoy_text,
         "username": "decoy",
         "post_url": permalink,
-        "via_browser": False,
+        "via_browser": True,
     }
     reply_result = await _do_reply(target, reply_text)
 
