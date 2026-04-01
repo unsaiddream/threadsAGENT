@@ -13,7 +13,7 @@ import os
 
 from agent.skills.threads import post_text, post_with_image, reply_to_post, get_my_posts, get_post_replies, get_my_username
 from agent.skills.threads_scraper import search_trending_posts, reply_via_browser, fetch_post_by_url
-from agent.skills.decoy_account import post_as_decoy
+from agent.skills.decoy_account import post_as_decoy, get_decoy_tokens
 from agent.skills.minprice import (
     search_prices, get_trending_products, get_best_deals,
     get_multi_store_products, get_price_drops,
@@ -625,22 +625,19 @@ async def _generate_decoy_post_text() -> str:
     """
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    shops = ["@airbafresh", "@magnumgo", "@arbuz_kz"]
-    # Каждый раз разный магазин чтобы не повторяться
+    shops = ["Airba Fresh", "Magnum", "Arbuz", "Small", "Green"]
     featured_shop = random.choice(shops)
-    other_shops = [s for s in shops if s != featured_shop]
 
     prompt = f"""Напиши короткий пост в Threads от лица обычного казахстанца — жалоба на высокие цены в магазинах.
 
 Требования:
-- Обязательно упомяни {featured_shop} (основной) и можно {other_shops[0]} вскользь
+- Упомяни магазин "{featured_shop}" БЕЗ символа @ (просто название, не тег)
 - Упомяни конкретный продукт: молоко, яйца, мясо, хлеб, овощи или фрукты
 - Назови конкретную цену в тенге (реалистичная для Казахстана 2025)
 - Тон: живой, эмоциональный, разговорный — как обычный пост в соцсети
 - Можно вопрос к подписчикам ("где вы берёте?", "это норм вообще?")
 - 1-3 предложения, не длинно
-- НЕ пиши hashtag'и
-- НЕ упоминай @minimalprice_kz (это другой аккаунт)
+- НЕ пиши hashtag'и и НЕ используй символ @ вообще
 - Пиши на русском, иногда казахские слова ок
 
 Верни ТОЛЬКО текст поста, без кавычек."""
@@ -653,11 +650,11 @@ async def _generate_decoy_post_text() -> str:
     return resp.content[0].text.strip()
 
 
-async def run_decoy_cycle(notify_fn=None) -> dict:
+async def run_decoy_cycle(notify_fn=None, token: str | None = None) -> dict:
     """
     Полный цикл искусственного трафика:
     1. Генерирует жалобный пост о ценах
-    2. Публикует от decoy аккаунта
+    2. Публикует от decoy аккаунта (token=None → первый аккаунт)
     3. Ждёт немного (имитация реального пользователя)
     4. Основной бот отвечает на этот пост
 
@@ -681,8 +678,8 @@ async def run_decoy_cycle(notify_fn=None) -> dict:
             await notify_fn(f"❌ {err}", topic="errors")
         return {"success": False, "error": err}
 
-    # Шаг 2: публикуем от decoy аккаунта
-    decoy_result = await post_as_decoy(decoy_text)
+    # Шаг 2: публикуем от decoy аккаунта (выбранного токена)
+    decoy_result = await post_as_decoy(decoy_text, token=token)
     if not decoy_result.get("success"):
         err = decoy_result.get("error", "?")
         logger.error(f"Decoy публикация провалилась: {err}")
@@ -700,9 +697,11 @@ async def run_decoy_cycle(notify_fn=None) -> dict:
             topic="replies"
         )
 
-    # Шаг 3: пауза (30-90 сек) — имитируем что основной бот "увидел" пост органически
-    delay = random.randint(30, 90)
-    logger.info(f"Decoy: жду {delay}с перед ответом...")
+    # Шаг 3: пауза 5-7 минут — имитируем что второй аккаунт "органически" наткнулся на пост
+    delay = random.randint(300, 420)
+    logger.info(f"Decoy: жду {delay}с ({delay//60} мин) перед ответом...")
+    if notify_fn:
+        await notify_fn(f"⏳ Жду {delay//60} мин перед ответом...", topic="replies")
     await asyncio.sleep(delay)
 
     # Шаг 4: генерируем ответ от основного аккаунта
@@ -747,217 +746,101 @@ async def run_decoy_cycle(notify_fn=None) -> dict:
         return {"success": False, "error": err}
 
 
-async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
+async def run_decoy_batch(count: int = 10, notify_fn=None) -> dict:
     """
-    Ищет трендовые посты по ключевым словам через Playwright scraper
-    и пишет контекстные комментарии со ссылкой на сайт.
+    Запускает N decoy циклов подряд, равномерно распределяя по всем decoy аккаунтам:
+    каждый цикл = жалобный пост от decoy аккаунта + ответ от основного аккаунта.
+    При 2 аккаунтах и count=10: 5 постов с аккаунта 1, 5 с аккаунта 2.
     """
-    settings = get_autopilot_settings()
-    keywords = settings.get("keywords", [
-        "цены на продукты",
-        "а что с ценами",
-        "дорожают продукты",
-        "кто нибудь сравнивал цены",
-        "сравните цены",
-    ])
-
-    if notify_fn:
-        await notify_fn(f"🔍 Ищу трендовые посты:\n{', '.join(keywords)}", topic="replies")
-
-    candidates = await _collect_reply_candidates(keywords, count)
-
-    if not candidates:
+    tokens = get_decoy_tokens()
+    if not tokens:
+        err = "DECOY_THREADS_ACCESS_TOKEN не задан в .env"
         if notify_fn:
-            await notify_fn("Реальных постов не найдено → запускаю decoy цикл.", topic="replies")
-        decoy = await run_decoy_cycle(notify_fn=notify_fn)
-        return {"replies_published": 1 if decoy.get("success") else 0, "errors": [], "decoy": decoy}
+            await notify_fn(f"❌ {err}", topic="errors")
+        return {"success": 0, "errors": [err]}
 
+    n_accounts = len(tokens)
     if notify_fn:
-        sample_info = "\n".join(
-            [f"• @{p.get('username','?')}: {p.get('text','')[:60]}..." for p in candidates[:3]]
+        await notify_fn(
+            f"🎭 Запускаю {count} decoy циклов ({n_accounts} аккаунт{'а' if n_accounts > 1 else ''}): пост + ответ...",
+            topic="replies"
         )
-        await notify_fn(f"Найдено {len(candidates)} постов:\n{sample_info}", topic="replies")
 
-    results = {"replies_published": 0, "errors": []}
+    success = 0
+    errors = []
 
-    replied_count = 0
-    for i, target in enumerate(candidates):
-        try:
-            context = target.get("_parent_post_text", "")
-            combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
-            score = target.get("_relevance_score", 1)
-            reply_text = await _generate_reply(combined_text, score=score)
+    for i in range(count):
+        # Чередуем токены равномерно: 0,1,0,1,... или 0,0,0,1,1,1,... (round-robin)
+        token = tokens[i % n_accounts]
+        result = await run_decoy_cycle(notify_fn=notify_fn, token=token)
+        if result.get("success"):
+            success += 1
+        else:
+            errors.append(f"Цикл {i+1}: {result.get('error', '?')}")
 
-            if reply_text is None:
-                # SKIP — не помечаем в БД, только в памяти (чтобы не попасть в следующий цикл)
-                _session_skip_cache.add(target["id"])
-                continue
-
-            result = await _do_reply(target, reply_text)
-
-            if result.get("success"):
-                mark_replied(target["id"])
-                results["replies_published"] += 1
-                replied_count += 1
-                if notify_fn:
-                    msg = _reply_notify_text(replied_count, len(candidates), target, reply_text, result)
-                    await notify_fn(msg, topic="replies")
-            else:
-                err = result.get("error", "?")
-                results["errors"].append(f"Ответ {i+1}: {err}")
-                if notify_fn:
-                    await notify_fn(f"❌ Ответ {i+1}:\n{err[:500]}", topic="errors")
-        except Exception as e:
-            results["errors"].append(f"Ответ {i+1}: {repr(e)}")
-            if notify_fn:
-                await notify_fn(f"❌ Ответ {i+1}:\n{repr(e)}", topic="errors")
-
-        if i < len(candidates) - 1:
+        # Пауза между циклами (кроме последнего)
+        if i < count - 1:
             delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
+            logger.info(f"Decoy батч: пауза {delay}с перед циклом {i+2}")
             await asyncio.sleep(delay)
 
     if notify_fn:
         await notify_fn(
-            f"Ответы завершены!\n"
-            f"Опубликовано: {results['replies_published']}/{len(candidates)}\n"
-            + (f"Ошибок: {len(results['errors'])}" if results["errors"] else ""),
+            f"🎭 Decoy батч завершён: {success}/{count} успешно"
+            + (f"\n⚠️ Ошибок: {len(errors)}" if errors else ""),
             topic="summary"
         )
-    return results
+
+    return {"success": success, "errors": errors}
+
+
+async def run_replies_only(notify_fn=None, count: int = 10) -> dict:
+    """
+    Запускает N decoy циклов (жалобный пост + умный ответ со ссылкой).
+    """
+    result = await run_decoy_batch(count=count, notify_fn=notify_fn)
+    return {"replies_published": result["success"], "errors": result["errors"]}
 
 
 async def run_autopilot(notify_fn=None, force: bool = False) -> dict:
-    """Главная функция автопилота"""
+    """
+    Главная функция автопилота.
+    Схема: @almat_y007kz (decoy) постит 2 жалобных поста → через 5-7 мин
+           аккаунт 2 (replier) отвечает с рекламой minprice.
+    4 раза в день = 8 постов + 8 ответов за сутки.
+    """
     settings = get_autopilot_settings()
     if not force and not settings.get("enabled"):
         return {"skipped": "автопилот выключен"}
 
-    niche = settings.get("niche", "цены на продукты и товары в Казахстане")
-    keywords = settings.get("keywords", [
-        "цены на продукты",
-        "а что с ценами",
-        "дорожают продукты",
-        "кто нибудь сравнивал цены",
-        "сравните цены",
-    ])
-    own_count = settings.get("own_posts_count", 5)
-    reply_count = settings.get("reply_posts_count", 10)
+    # 2 decoy цикла на каждую из 4 фаз = 8 постов/день
+    DECOY_COUNT = 2
 
     results = {"own_published": 0, "replies_published": 0, "errors": []}
 
     if notify_fn:
         await notify_fn(
-            f"Автопилот запустился\nПлан: {own_count} постов + {reply_count} ответов\nЗагружаю цены с minprice.kz...",
+            f"Автопилот запустился\n"
+            f"🎭 {DECOY_COUNT} decoy цикла: @almat_y007kz постит → аккаунт 2 отвечает (~5-7 мин задержка)",
             topic="summary"
         )
 
-    log_action("autopilot_start", f"own={own_count} replies={reply_count}")
+    log_action("autopilot_start", f"decoy={DECOY_COUNT}")
 
-    # ── 1. Свои посты (внутри загружаются deals + prices) ──
-    try:
-        own_posts = await _generate_own_posts("", niche, own_count)
-    except Exception as e:
-        logger.error(f"Ошибка генерации постов: {e}")
-        results["errors"].append(f"Генерация: {e}")
-        own_posts = []
-        if notify_fn:
-            await notify_fn(f"❌ Генерация постов: {repr(e)}", topic="errors")
-
-    for i, post_data in enumerate(own_posts):
-        try:
-            text = post_data["text"]
-            image_url = post_data.get("image_url")
-
-            # Постим как текст — Threads сам покажет превью ссылки из поста
-            result = await post_text(text)
-
-            if result.get("success"):
-                results["own_published"] += 1
-                if notify_fn:
-                    permalink = result.get("permalink") or ""
-                    link_line = f"\n🔗 {permalink}" if permalink else ""
-                    await notify_fn(
-                        f"📝 Пост {i+1}/{own_count}:\n{text[:200]}...{link_line}",
-                        topic="posts"
-                    )
-            else:
-                err = result.get("error", "неизвестная ошибка")
-                results["errors"].append(f"Пост {i+1}: {err}")
-                if notify_fn:
-                    await notify_fn(f"❌ Пост {i+1}:\n{err[:500]}", topic="errors")
-        except Exception as e:
-            results["errors"].append(f"Пост {i+1}: {repr(e)}")
-            if notify_fn:
-                await notify_fn(f"❌ Пост {i+1} exception:\n{repr(e)}", topic="errors")
-
-        if i < len(own_posts) - 1:
-            delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
-            await asyncio.sleep(delay)
-
-    # ── 2. Ищем трендовые посты и пишем контекстные ответы ─
-    if notify_fn:
-        await notify_fn(f"🔍 Ищу трендовые посты:\n{', '.join(keywords)}", topic="replies")
-
-    to_reply = await _collect_reply_candidates(keywords, reply_count)
-
-    if not to_reply:
-        if notify_fn:
-            await notify_fn("Не найдено постов для ответов.", topic="replies")
-    else:
-        if notify_fn:
-            sample = "\n".join([f"• @{p.get('username','?')}: {p.get('text','')[:50]}..." for p in to_reply[:3]])
-            await notify_fn(f"Найдено {len(to_reply)} постов:\n{sample}", topic="replies")
-        replied_count = 0
-        for i, target in enumerate(to_reply):
-            try:
-                # Пауза МЕЖДУ ответами (не перед первым — первый сразу)
-                if i > 0:
-                    delay = random.randint(MIN_DELAY_SEC, MAX_DELAY_SEC)
-                    await asyncio.sleep(delay)
-
-                context = target.get("_parent_post_text", "")
-                combined_text = f"{target['text']}\n[пост: {context[:100]}]" if context else target["text"]
-                score = target.get("_relevance_score", 1)
-                reply_text = await _generate_reply(combined_text, score=score)
-
-                if reply_text is None:
-                    # SKIP — только в памяти, не в БД
-                    _session_skip_cache.add(target["id"])
-                    continue
-
-                result = await _do_reply(target, reply_text)
-
-                if result.get("success"):
-                    mark_replied(target["id"])
-                    results["replies_published"] += 1
-                    replied_count += 1
-                    if notify_fn:
-                        msg = _reply_notify_text(replied_count, reply_count, target, reply_text, result)
-                        await notify_fn(msg, topic="replies")
-                else:
-                    err = result.get("error", "?")
-                    results["errors"].append(f"Ответ {i+1}: {err}")
-                    if notify_fn:
-                        await notify_fn(f"❌ Ответ {i+1}:\n{err[:500]}", topic="errors")
-            except Exception as e:
-                results["errors"].append(f"Ответ {i+1}: {repr(e)}")
-                if notify_fn:
-                    await notify_fn(f"❌ Ответ {i+1}:\n{repr(e)}", topic="errors")
+    # Только decoy циклы — никаких "своих" постов от основного аккаунта
+    decoy_result = await run_decoy_batch(count=DECOY_COUNT, notify_fn=notify_fn)
+    results["replies_published"] = decoy_result["success"]
+    results["errors"].extend(decoy_result["errors"])
 
     update_autopilot_settings(last_run=datetime.now().isoformat())
     log_action("autopilot_done", None, str(results))
 
-    total_cost = (
-        getattr(_generate_own_posts, "last_cost", 0) +
-        getattr(_generate_reply, "total_cost", 0)
-    )
-    _generate_own_posts.last_cost = 0
+    total_cost = getattr(_generate_reply, "total_cost", 0)
     _generate_reply.total_cost = 0
 
     summary = (
         f"✅ Автопилот завершён!\n"
-        f"📝 Постов: {results['own_published']}/{own_count}\n"
-        f"💬 Ответов: {results['replies_published']}/{reply_count}\n"
+        f"🎭 Decoy циклов: {results['replies_published']}/{DECOY_COUNT}\n"
         f"💰 Потрачено токенов: ~${total_cost:.4f}"
     )
     if results["errors"]:

@@ -3,6 +3,7 @@ OpenClaw — AI агент для Threads Meta
 Запуск: python main.py
 """
 import asyncio
+import sys
 import logging
 import os
 from pathlib import Path
@@ -22,6 +23,11 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def is_focus_overlay_mode() -> bool:
+    """Desktop overlay mode does not need bot-related environment variables."""
+    return len(sys.argv) > 1 and sys.argv[1].lower() in {"focus", "overlay", "focus-overlay", "adhd"}
 
 
 def check_env():
@@ -87,4 +93,9 @@ async def main():
 
 
 if __name__ == "__main__":
+    if is_focus_overlay_mode():
+        from desktop.focus_overlay import run_focus_overlay
+
+        raise SystemExit(run_focus_overlay())
+
     asyncio.run(main())

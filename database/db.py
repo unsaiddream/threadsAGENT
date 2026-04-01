@@ -104,6 +104,20 @@ def init_db():
         )
     """)
 
+    # Опубликованные посты в Instagram
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS instagram_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id TEXT,
+            caption TEXT,
+            image_url TEXT,
+            post_type TEXT DEFAULT 'PHOTO',
+            status TEXT DEFAULT 'published',
+            permalink TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -179,6 +193,26 @@ def mark_scheduled_post_done(post_id: int, status: str = "published"):
     conn.execute("UPDATE scheduled_posts SET status=? WHERE id=?", (status, post_id))
     conn.commit()
     conn.close()
+
+
+def save_instagram_post(media_id: str, caption: str, image_url: str = None,
+                         post_type: str = "PHOTO", permalink: str = None):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO instagram_posts (media_id, caption, image_url, post_type, permalink) VALUES (?, ?, ?, ?, ?)",
+        (media_id, caption, image_url, post_type, permalink)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_instagram_posts(limit: int = 10) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM instagram_posts ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ── Автопилот ──────────────────────────────────────────────
