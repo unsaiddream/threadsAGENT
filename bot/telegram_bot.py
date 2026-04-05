@@ -467,6 +467,22 @@ async def decoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {result.get('error', '?')}")
 
 
+async def comparison_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Опубликовать пост-сравнение цен от replier-аккаунта вручную"""
+    if not is_authorized(update):
+        await deny_non_owner(update)
+        return
+
+    await update.message.reply_text("📊 Генерирую и публикую comparison пост...")
+
+    from agent.autopilot import run_own_comparison_posts
+    result = await run_own_comparison_posts(count=1, notify_fn=notify)
+
+    if result["published"] == 0:
+        err = result["errors"][0] if result["errors"] else "неизвестная ошибка"
+        await update.message.reply_text(f"❌ Пост не вышел: {err}")
+
+
 async def instagram_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Опубликовать ежедневный пост в Instagram вручную"""
     if not is_authorized(update):
@@ -718,6 +734,7 @@ def create_bot() -> Application:
     _app.add_handler(CommandHandler("monitor_on", monitor_on_command))
     _app.add_handler(CommandHandler("monitor_off", monitor_off_command))
     _app.add_handler(CommandHandler("decoy", decoy_command))
+    _app.add_handler(CommandHandler("comparison", comparison_post_command))
     _app.add_handler(CommandHandler("check_search", check_search_command))
     _app.add_handler(CommandHandler("instagram_post", instagram_post_command))
     _app.add_handler(CommandHandler("instagram_stats", instagram_stats_command))
